@@ -5,7 +5,6 @@ const employeeSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true },
   position: { type: String, required: true },
   salary: { type: Number, required: true },
-  
 });
 
 module.exports = mongoose.model("Employee", employeeSchema);
