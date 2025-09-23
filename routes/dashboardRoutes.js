@@ -9,7 +9,7 @@ const {
   getTodaySchedule,
   getWeeklyEarnings,
   getEarningsSummary
-} = require("../Controller/dashboardController"); // ✅ Fixed case
+} = require("../Controller/DashboardController"); // ✅ Fixed case
 
 const router = express.Router();
 

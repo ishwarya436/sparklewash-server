@@ -2,7 +2,6 @@ const User = require("../models/User");
 const Request = require("../models/Request");
 const Job = require("../models/Jobs");
 const Earning = require("../models/Earning");
-const dashboardController = require("./dashboardController");
 
 
 // Get user info
