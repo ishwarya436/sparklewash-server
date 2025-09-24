@@ -3,7 +3,6 @@ const Request = require("../models/Request");
 const Job = require("../models/Jobs");
 const Earning = require("../models/Earning");
 
-
 // Get user info
 exports.getUser = async (req, res) => {
   try {

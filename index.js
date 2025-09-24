@@ -7,6 +7,8 @@ const authRoutes = require("./routes/authRoutes");
 const EmployeeRoutes = require("./routes/employeeRoutes");
 const userRoutes = require("./routes/userRoutes");
 const Job = require("./models/Jobs");
+const dashboardRoutes = require("./routes/dashboardRoutes");
+
 
 dotenv.config();
 const app = express();
@@ -18,7 +20,6 @@ app.use(express.json());
 
 
 // Routes
-const dashboardRoutes = require("./routes/dashboardRoutes");
 app.use("/api", dashboardRoutes);
 
 
