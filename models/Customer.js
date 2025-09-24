@@ -9,6 +9,7 @@ const customerSchema = new mongoose.Schema({
   carModel: { type: String, required: true },
   vehicleNo: { type: String, required: true },
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: "Package" },
+  washerId: { type: mongoose.Schema.Types.ObjectId, ref: "Washer" },
   subscriptionStart: { type: Date, default: Date.now },
   subscriptionEnd: { type: Date },
   status: { type: String, enum: ["active", "inactive"], default: "active" }

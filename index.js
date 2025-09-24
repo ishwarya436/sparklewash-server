@@ -8,6 +8,11 @@ const EmployeeRoutes = require("./routes/employeeRoutes");
 const userRoutes = require("./routes/userRoutes");
 const Job = require("./models/Jobs");
 const dashboardRoutes = require("./routes/dashboardRoutes");
+const { getAllCustomers } = require("./Controller/CustomerController");
+const customerRoutes = require("./routes/CustomerRoutes");
+const WasherRoutes = require("./routes/WasherRoutes");
+const PackageRoutes = require("./routes/PackageRoutes");
+
 
 
 dotenv.config();
@@ -32,8 +37,12 @@ app.use("/api/auth", authRoutes);
 app.use('/api/getUser', EmployeeRoutes)
 // app.use("/api/employees", EmployeeRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/customer", customerRoutes);
 
 
+
+// ✅ Use Package Routes
+app.use("/api/package", PackageRoutes);
 
 // DB Connection
 mongoose.connect(process.env.MONGO_URI, {
@@ -47,6 +56,14 @@ mongoose.connect(process.env.MONGO_URI, {
 app.get("/", (req, res) => {
   res.send("SparkleWash API running...");
 });
+
+
+
+// Use Washer routes
+// /api/washers -> GET all washers
+// /api/washers/logs -> GET all washer logs
+// /api/washers/schedules -> GET all wash schedules
+app.use("/api/washer", WasherRoutes);
 
 // Start Server
 const PORT = process.env.PORT || 5000;
