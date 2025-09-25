@@ -12,6 +12,7 @@ const { getAllCustomers } = require("./Controller/CustomerController");
 const customerRoutes = require("./routes/CustomerRoutes");
 const WasherRoutes = require("./routes/WasherRoutes");
 const PackageRoutes = require("./routes/PackageRoutes");
+const washLogRoutes = require("./routes/washLogRoutes");
 
 
 
@@ -38,6 +39,7 @@ app.use('/api/getUser', EmployeeRoutes)
 // app.use("/api/employees", EmployeeRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/customer", customerRoutes);
+app.use("/api/washlog", washLogRoutes);
 
 
 
