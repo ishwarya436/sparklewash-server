@@ -1,27 +1,23 @@
 const mongoose = require("mongoose");
 
-const customerSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  mobileNo: { type: String, required: true },
-  email: { type: String },
-  apartment: { type: String, required: true },
-  doorNo: { type: String, required: true },
+// Vehicle subdocument schema
+const vehicleSchema = new mongoose.Schema({
   carModel: { type: String, required: true },
-  carType: { type: String, enum: ["sedan", "suv", "premium"], required: true }, // Car type based on package
-  vehicleNo: { type: String, required: true, unique: true },
+  vehicleNo: { type: String, required: true },
+  carType: { type: String, enum: ["sedan", "suv", "premium"], required: true },
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: "Package" },
-  packageName: { type: String }, // Add packageName column to store package name
+  packageName: { type: String },
   washerId: { type: mongoose.Schema.Types.ObjectId, ref: "Washer" },
   
-  // Washing Schedule Configuration
+  // Washing Schedule Configuration for this vehicle
   washingSchedule: {
     scheduleType: { 
       type: String, 
-      enum: ['schedule1', 'schedule2'], // schedule1: Mon+Wed+Fri, schedule2: Tue+Thu+Sat
+      enum: ['schedule1', 'schedule2'], 
       default: 'schedule1'
     },
     washingDays: {
-      type: [Number], // 0=Sunday, 1=Monday, 2=Tuesday, 3=Wednesday, 4=Thursday, 5=Friday, 6=Saturday
+      type: [Number], 
       default: []
     },
     lastWashDate: { type: Date },
@@ -31,11 +27,83 @@ const customerSchema = new mongoose.Schema({
   
   subscriptionStart: { type: Date, default: Date.now },
   subscriptionEnd: { type: Date },
+  status: { type: String, enum: ["active", "inactive"], default: "active" },
+  
+  // Wash statistics for this vehicle
+  totalWashes: { type: Number, default: 0 },
+  completedWashes: { type: Number, default: 0 },
+  pendingWashes: { type: Number, default: 0 }
+}, {
+  timestamps: true
+});
+
+const customerSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  mobileNo: { type: String, required: true },
+  email: { type: String },
+  apartment: { type: String, required: true },
+  doorNo: { type: String, required: true },
+  
+  // Multiple vehicles support
+  vehicles: [vehicleSchema],
+  
+  // Backward compatibility fields (for single vehicle customers)
+  carModel: { type: String },
+  carType: { type: String, enum: ["sedan", "suv", "premium"] },
+  vehicleNo: { type: String },
+  packageId: { type: mongoose.Schema.Types.ObjectId, ref: "Package" },
+  packageName: { type: String },
+  washerId: { type: mongoose.Schema.Types.ObjectId, ref: "Washer" },
+  washingSchedule: {
+    scheduleType: { 
+      type: String, 
+      enum: ['schedule1', 'schedule2'],
+      default: 'schedule1'
+    },
+    washingDays: {
+      type: [Number],
+      default: []
+    },
+    lastWashDate: { type: Date },
+    nextWashDate: { type: Date },
+    washFrequencyPerMonth: { type: Number, default: 8 }
+  },
+  subscriptionStart: { type: Date, default: Date.now },
+  subscriptionEnd: { type: Date },
   status: { type: String, enum: ["active", "inactive"], default: "active" }
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
+
+// Virtual for total vehicles count
+customerSchema.virtual('totalVehicles').get(function() {
+  return this.vehicles ? this.vehicles.length : (this.vehicleNo ? 1 : 0);
+});
+
+// Virtual to check if customer has multiple vehicles
+customerSchema.virtual('hasMultipleVehicles').get(function() {
+  return this.vehicles && this.vehicles.length > 1;
+});
+
+// Virtual for primary vehicle (for display purposes)
+customerSchema.virtual('primaryVehicle').get(function() {
+  if (this.vehicles && this.vehicles.length > 0) {
+    return this.vehicles[0];
+  } else if (this.vehicleNo) {
+    return {
+      carModel: this.carModel,
+      vehicleNo: this.vehicleNo,
+      carType: this.carType,
+      packageName: this.packageName
+    };
+  }
+  return null;
+});
+
+// Create unique index for vehicle numbers across all customers
+customerSchema.index({ "vehicles.vehicleNo": 1 }, { unique: true, sparse: true });
+customerSchema.index({ "vehicleNo": 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("Customer", customerSchema);

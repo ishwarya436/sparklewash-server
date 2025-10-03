@@ -14,11 +14,10 @@ const WasherRoutes = require("./routes/WasherRoutes");
 const PackageRoutes = require("./routes/PackageRoutes");
 const washLogRoutes = require("./routes/washLogRoutes");
 
-
-
-dotenv.config();
-const app = express();
+// Load environment variables first
 require("dotenv").config();
+
+const app = express();
 
 // Middleware
 app.use(cors());

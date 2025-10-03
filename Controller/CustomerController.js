@@ -52,42 +52,150 @@ const calculateWashCounts = async (customer) => {
   }
 };
 
-// ✅ Get all customers with package & washer details + wash counts
+// Helper function to calculate wash counts for individual vehicles
+const calculateVehicleWashCounts = async (customerId, vehicle) => {
+  try {
+    if (!vehicle.packageId) return { completed: 0, pending: 0, total: 0 };
+    
+    // Calculate total washes for current month based on package
+    let totalMonthlyWashes = 0;
+    const packageName = vehicle.packageId.name;
+    
+    if (packageName === 'Basic') {
+      totalMonthlyWashes = 8; // 2 times per week * 4 weeks
+    } else if (packageName === 'Moderate') {
+      totalMonthlyWashes = 12; // 3 times per week * 4 weeks
+    } else if (packageName === 'Classic') {
+      totalMonthlyWashes = 12; // 3 times per week * 4 weeks (exterior only)
+    }
+    
+    // Calculate date range for current month
+    const currentDate = new Date();
+    const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+    const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+    
+    // Count completed washes this month for this specific vehicle
+    const completedWashes = await WashLog.countDocuments({
+      customerId: customerId,
+      vehicleId: vehicle._id,
+      washDate: {
+        $gte: startOfMonth,
+        $lte: endOfMonth
+      },
+      status: 'completed'
+    });
+    
+    // Calculate pending washes
+    const pendingWashes = Math.max(0, totalMonthlyWashes - completedWashes);
+    
+    return {
+      completed: completedWashes,
+      pending: pendingWashes,
+      total: totalMonthlyWashes
+    };
+  } catch (error) {
+    console.error('Error calculating vehicle wash counts:', error);
+    return { completed: 0, pending: 0, total: 0 };
+  }
+};
+
+// ✅ Get all customers with package & washer details + wash counts (Multi-vehicle support)
 exports.getAllCustomers = async (req, res) => {
   try {
     const customers = await Customer.find()
-      .populate("packageId")   // Get package details
-      .populate("washerId");   // Get washer details if stored in customer
+      .populate("packageId")   // Get package details for backward compatibility
+      .populate("washerId")    // Get washer details for backward compatibility
+      .populate("vehicles.packageId")  // Get package details for each vehicle
+      .populate("vehicles.washerId");  // Get washer details for each vehicle
 
     // Add wash counts for each customer
     const customersWithWashCounts = await Promise.all(
       customers.map(async (customer) => {
-        const washCounts = await calculateWashCounts(customer);
+        let aggregateWashCounts = { completed: 0, pending: 0, total: 0 };
         
-        return {
-          _id: customer._id,
-          name: customer.name,
-          mobileNo: customer.mobileNo,
-          email: customer.email,
-          apartment: customer.apartment,
-          doorNo: customer.doorNo,
-          carModel: customer.carModel,
-          carType: customer.carType, // Include carType in response
-          vehicleNo: customer.vehicleNo,
-          packageId: customer.packageId,
-          packageName: customer.packageId ? customer.packageId.name : null, // Add package name
-          washerId: customer.washerId,
-          subscriptionStart: customer.subscriptionStart,
-          subscriptionEnd: customer.subscriptionEnd,
-          status: customer.status,
-          washingSchedule: customer.washingSchedule, // Include washing schedule
-          // Add wash count information
-          pendingWashes: washCounts.pending,
-          completedWashes: washCounts.completed,
-          totalMonthlyWashes: washCounts.total,
-          // Add package price if available
-          price: customer.packageId ? customer.packageId.pricePerMonth : 0
-        };
+        // Handle multi-vehicle customers
+        if (customer.vehicles && customer.vehicles.length > 0) {
+          // Calculate wash counts for each vehicle individually
+          const vehiclesWithWashCounts = await Promise.all(
+            customer.vehicles.map(async (vehicle) => {
+              const vehicleWashCounts = await calculateVehicleWashCounts(customer._id, vehicle);
+              aggregateWashCounts.completed += vehicleWashCounts.completed;
+              aggregateWashCounts.pending += vehicleWashCounts.pending;
+              aggregateWashCounts.total += vehicleWashCounts.total;
+              
+              return {
+                _id: vehicle._id,
+                carModel: vehicle.carModel,
+                vehicleNo: vehicle.vehicleNo,
+                carType: vehicle.carType,
+                packageId: vehicle.packageId,
+                packageName: vehicle.packageId ? vehicle.packageId.name : null,
+                washerId: vehicle.washerId,
+                washingSchedule: vehicle.washingSchedule,
+                subscriptionStart: vehicle.subscriptionStart,
+                subscriptionEnd: vehicle.subscriptionEnd,
+                status: vehicle.status,
+                // Individual vehicle wash counts
+                pendingWashes: vehicleWashCounts.pending,
+                completedWashes: vehicleWashCounts.completed,
+                totalMonthlyWashes: vehicleWashCounts.total
+              };
+            })
+          );
+          
+          return {
+            _id: customer._id,
+            name: customer.name,
+            mobileNo: customer.mobileNo,
+            email: customer.email,
+            apartment: customer.apartment,
+            doorNo: customer.doorNo,
+            // Multi-vehicle specific fields with individual wash counts
+            vehicles: vehiclesWithWashCounts,
+            totalVehicles: customer.totalVehicles,
+            hasMultipleVehicles: customer.hasMultipleVehicles,
+            primaryVehicle: customer.primaryVehicle,
+            // Aggregate wash counts across all vehicles
+            aggregateWashCounts: aggregateWashCounts,
+            pendingWashes: aggregateWashCounts.pending,
+            completedWashes: aggregateWashCounts.completed,
+            totalMonthlyWashes: aggregateWashCounts.total,
+            // Primary vehicle info for display compatibility
+            carModel: customer.vehicles[0].carModel,
+            vehicleNo: customer.vehicles[0].vehicleNo,
+            packageName: customer.vehicles[0].packageId ? customer.vehicles[0].packageId.name : null,
+            price: customer.vehicles[0].packageId ? customer.vehicles[0].packageId.pricePerMonth : 0
+          };
+        } else {
+          // Handle single vehicle customers (backward compatibility)
+          const washCounts = await calculateWashCounts(customer);
+          
+          return {
+            _id: customer._id,
+            name: customer.name,
+            mobileNo: customer.mobileNo,
+            email: customer.email,
+            apartment: customer.apartment,
+            doorNo: customer.doorNo,
+            carModel: customer.carModel,
+            carType: customer.carType,
+            vehicleNo: customer.vehicleNo,
+            packageId: customer.packageId,
+            packageName: customer.packageId ? customer.packageId.name : null,
+            washerId: customer.washerId,
+            subscriptionStart: customer.subscriptionStart,
+            subscriptionEnd: customer.subscriptionEnd,
+            status: customer.status,
+            washingSchedule: customer.washingSchedule,
+            totalVehicles: 1,
+            hasMultipleVehicles: false,
+            // Wash count information
+            pendingWashes: washCounts.pending,
+            completedWashes: washCounts.completed,
+            totalMonthlyWashes: washCounts.total,
+            price: customer.packageId ? customer.packageId.pricePerMonth : 0
+          };
+        }
       })
     );
 
@@ -131,10 +239,10 @@ exports.getCustomerById = async (req, res) => {
   }
 };
 
-// ✅ Add new customer
+// ✅ Add new customer (Multi-vehicle support)
 exports.addCustomer = async (req, res) => {
   try {
-    console.log('Received request body:', JSON.stringify(req.body, null, 2)); // Debug log
+    console.log('Received request body:', JSON.stringify(req.body, null, 2));
     
     const {
       name,
@@ -142,118 +250,231 @@ exports.addCustomer = async (req, res) => {
       email,
       apartment,
       doorNo,
+      vehicles, // Array of vehicles for multi-vehicle customers
+      // Backward compatibility fields for single vehicle
       carModel,
       vehicleNo,
       packageId,
       packageName,
       washerId,
-      scheduleType // New field for schedule selection
+      scheduleType
     } = req.body;
 
-    console.log('Extracted scheduleType:', scheduleType); // Debug log
-
     // Validate required fields
-    if (!name || !mobileNo || !apartment || !doorNo || !carModel || !vehicleNo || !packageId) {
+    if (!name || !mobileNo || !apartment || !doorNo) {
       return res.status(400).json({ 
-        message: "All required fields must be provided" 
+        message: "Name, mobile number, apartment, and door number are required" 
       });
     }
 
-    // Check if vehicle number already exists
-    const existingVehicle = await Customer.findOne({ vehicleNo: vehicleNo.trim() });
-    if (existingVehicle) {
-      return res.status(400).json({ 
-        message: `Vehicle number ${vehicleNo} already exists. Please check and update.` 
-      });
-    }
+    // Handle multi-vehicle creation
+    if (vehicles && vehicles.length > 0) {
+      // Validate vehicle data
+      for (const vehicle of vehicles) {
+        if (!vehicle.carModel || !vehicle.vehicleNo || !vehicle.packageId) {
+          return res.status(400).json({ 
+            message: "Each vehicle must have car model, vehicle number, and package" 
+          });
+        }
 
-    // Get package details to determine carType
-    const Package = require('../models/Package');
-    const selectedPackage = await Package.findById(packageId);
-    if (!selectedPackage) {
-      return res.status(400).json({ 
-        message: "Selected package not found" 
-      });
-    }
-
-    // Calculate subscription dates
-    const subscriptionStart = new Date();
-    const subscriptionEnd = new Date();
-    subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1); // One month from start date
-
-    // Determine washing schedule based on package and schedule type
-    let washingDays = [];
-    let washFrequencyPerMonth = 8; // Default for Basic
-    
-    const selectedScheduleType = scheduleType || 'schedule1';
-    
-    if (packageName === 'Basic') {
-      // Basic: 2 times a week
-      washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6]; // Mon+Thu or Tue+Sat
-      washFrequencyPerMonth = 8;
-    } else if (packageName === 'Moderate' || packageName === 'Classic') {
-      // Moderate/Classic: 3 times a week
-      washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6]; // Mon+Wed+Fri or Tue+Thu+Sat
-      washFrequencyPerMonth = 12;
-    }
-
-    // Prepare customer data - handle empty washerId
-    const customerData = {
-      name,
-      mobileNo,
-      email,
-      apartment,
-      doorNo,
-      carModel,
-      carType: selectedPackage.carType, // Get carType from selected package
-      vehicleNo,
-      packageId,
-      packageName, // Save package name directly
-      subscriptionStart,
-      subscriptionEnd,
-      washingSchedule: {
-        scheduleType: selectedScheduleType,
-        washingDays: washingDays,
-        washFrequencyPerMonth: washFrequencyPerMonth,
-        lastWashDate: null,
-        nextWashDate: null
+        // Check if vehicle number already exists
+        const existingVehicle = await Customer.findOne({ 
+          $or: [
+            { vehicleNo: vehicle.vehicleNo.trim() },
+            { "vehicles.vehicleNo": vehicle.vehicleNo.trim() }
+          ]
+        });
+        
+        if (existingVehicle) {
+          return res.status(400).json({ 
+            message: `Vehicle number ${vehicle.vehicleNo} already exists` 
+          });
+        }
       }
-    };
 
-    // Only add washerId if it's not empty
-    if (washerId && washerId.trim() !== '') {
-      customerData.washerId = washerId;
+      // Process each vehicle
+      const processedVehicles = await Promise.all(
+        vehicles.map(async (vehicle) => {
+          const Package = require('../models/Package');
+          const selectedPackage = await Package.findById(vehicle.packageId);
+          
+          if (!selectedPackage) {
+            throw new Error(`Package not found for vehicle ${vehicle.vehicleNo}`);
+          }
+
+          // Calculate subscription dates
+          const subscriptionStart = new Date();
+          const subscriptionEnd = new Date();
+          subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+
+          // Determine washing schedule
+          let washingDays = [];
+          let washFrequencyPerMonth = 8;
+          
+          const selectedScheduleType = vehicle.scheduleType || 'schedule1';
+          
+          if (selectedPackage.name === 'Basic') {
+            washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
+            washFrequencyPerMonth = 8;
+          } else if (selectedPackage.name === 'Moderate' || selectedPackage.name === 'Classic') {
+            washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
+            washFrequencyPerMonth = 12;
+          }
+
+          return {
+            carModel: vehicle.carModel.trim(),
+            vehicleNo: vehicle.vehicleNo.trim().toUpperCase(),
+            carType: selectedPackage.carType || 'sedan',
+            packageId: vehicle.packageId,
+            packageName: selectedPackage.name,
+            washerId: vehicle.washerId || null,
+            washingSchedule: {
+              scheduleType: selectedScheduleType,
+              washingDays: washingDays,
+              washFrequencyPerMonth: washFrequencyPerMonth
+            },
+            subscriptionStart,
+            subscriptionEnd,
+            status: 'active'
+          };
+        })
+      );
+
+      // Create multi-vehicle customer
+      const newCustomer = new Customer({
+        name: name.trim(),
+        mobileNo: mobileNo.trim(),
+        email: email ? email.trim() : '',
+        apartment: apartment.trim(),
+        doorNo: doorNo.trim(),
+        vehicles: processedVehicles,
+        status: 'active',
+        // Explicitly set old schema fields to undefined for multi-vehicle customers
+        vehicleNo: undefined,
+        carModel: undefined,
+        carType: undefined,
+        packageId: undefined,
+        packageName: undefined,
+        washerId: undefined,
+        washingSchedule: undefined,
+        subscriptionStart: undefined,
+        subscriptionEnd: undefined
+      });
+
+      const savedCustomer = await newCustomer.save();
+      
+      // Populate vehicle package and washer details
+      const populatedCustomer = await Customer.findById(savedCustomer._id)
+        .populate('vehicles.packageId')
+        .populate('vehicles.washerId');
+
+      res.status(201).json({ 
+        message: "Multi-vehicle customer created successfully", 
+        customer: populatedCustomer 
+      });
+
+    } else {
+      // Handle single vehicle creation (backward compatibility)
+      if (!carModel || !vehicleNo || !packageId) {
+        return res.status(400).json({ 
+          message: "Car model, vehicle number, and package are required" 
+        });
+      }
+
+      // Check if vehicle number already exists
+      const existingVehicle = await Customer.findOne({ 
+        $or: [
+          { vehicleNo: vehicleNo.trim() },
+          { "vehicles.vehicleNo": vehicleNo.trim() }
+        ]
+      });
+      
+      if (existingVehicle) {
+        return res.status(400).json({ 
+          message: `Vehicle number ${vehicleNo} already exists` 
+        });
+      }
+
+      // Get package details
+      const Package = require('../models/Package');
+      const selectedPackage = await Package.findById(packageId);
+      
+      if (!selectedPackage) {
+        return res.status(400).json({ 
+          message: "Selected package not found" 
+        });
+      }
+
+      // Calculate subscription dates and washing schedule
+      const subscriptionStart = new Date();
+      const subscriptionEnd = new Date();
+      subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+
+      let washingDays = [];
+      let washFrequencyPerMonth = 8;
+      
+      const selectedScheduleType = scheduleType || 'schedule1';
+      
+      if (selectedPackage.name === 'Basic') {
+        washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
+        washFrequencyPerMonth = 8;
+      } else if (selectedPackage.name === 'Moderate' || selectedPackage.name === 'Classic') {
+        washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
+        washFrequencyPerMonth = 12;
+      }
+
+      // Create single vehicle customer
+      const newCustomer = new Customer({
+        name: name.trim(),
+        mobileNo: mobileNo.trim(),
+        email: email ? email.trim() : '',
+        apartment: apartment.trim(),
+        doorNo: doorNo.trim(),
+        carModel: carModel.trim(),
+        vehicleNo: vehicleNo.trim().toUpperCase(),
+        carType: selectedPackage.carType || 'sedan',
+        packageId,
+        packageName: selectedPackage.name,
+        washerId: washerId || null,
+        washingSchedule: {
+          scheduleType: selectedScheduleType,
+          washingDays: washingDays,
+          washFrequencyPerMonth: washFrequencyPerMonth
+        },
+        subscriptionStart,
+        subscriptionEnd,
+        status: 'active'
+      });
+
+      const savedCustomer = await newCustomer.save();
+      
+      const populatedCustomer = await Customer.findById(savedCustomer._id)
+        .populate('packageId')
+        .populate('washerId');
+
+      res.status(201).json({ 
+        message: "Customer created successfully", 
+        customer: populatedCustomer 
+      });
     }
 
-    console.log('Customer data to save:', JSON.stringify(customerData, null, 2)); // Debug log
-
-    const newCustomer = new Customer(customerData);
-    
-    await newCustomer.save();
-    
-    // Populate package details for response
-    const populatedCustomer = await Customer.findById(newCustomer._id)
-      .populate("packageId")
-      .populate("washerId");
-
-    // Calculate wash counts for the new customer
-    const washCounts = await calculateWashCounts(populatedCustomer);
-
-    const customerWithWashCounts = {
-      ...populatedCustomer.toObject(),
-      packageName: populatedCustomer.packageName || (populatedCustomer.packageId ? populatedCustomer.packageId.name : null),
-      pendingWashes: washCounts.pending,
-      completedWashes: washCounts.completed,
-      totalMonthlyWashes: washCounts.total,
-      price: populatedCustomer.packageId ? populatedCustomer.packageId.pricePerMonth : 0
-    };
-
-    res.status(201).json({
-      message: "Customer added successfully",
-      customer: customerWithWashCounts
-    });
   } catch (error) {
-    res.status(500).json({ message: "Error adding customer", error: error.message });
+    console.error('Error creating customer:', error);
+    
+    if (error.code === 11000) {
+      // Handle duplicate key error
+      const duplicateField = Object.keys(error.keyValue)[0];
+      const duplicateValue = error.keyValue[duplicateField];
+      
+      return res.status(400).json({ 
+        message: `${duplicateField === 'vehicleNo' ? 'Vehicle number' : duplicateField} '${duplicateValue}' already exists` 
+      });
+    }
+    
+    res.status(500).json({ 
+      message: "Error creating customer", 
+      error: error.message 
+    });
   }
 };
 
@@ -997,3 +1218,456 @@ exports.bulkImportCustomers = async (req, res) => {
     res.status(500).json({ message: "Error processing bulk import", error: error.message });
   }
 };
+
+// ✅ Add vehicle to existing customer
+exports.addVehicleToCustomer = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { carModel, vehicleNo, packageId, scheduleType, washerId } = req.body;
+
+    // Validate required fields
+    if (!carModel || !vehicleNo || !packageId) {
+      return res.status(400).json({ 
+        message: "Car model, vehicle number, and package are required" 
+      });
+    }
+
+    // Check if customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Check if vehicle number already exists
+    const existingVehicle = await Customer.findOne({ 
+      $or: [
+        { vehicleNo: vehicleNo.trim() },
+        { "vehicles.vehicleNo": vehicleNo.trim() }
+      ]
+    });
+    
+    if (existingVehicle) {
+      return res.status(400).json({ 
+        message: `Vehicle number ${vehicleNo} already exists` 
+      });
+    }
+
+    // Get package details
+    const Package = require('../models/Package');
+    const selectedPackage = await Package.findById(packageId);
+    
+    if (!selectedPackage) {
+      return res.status(400).json({ 
+        message: "Selected package not found" 
+      });
+    }
+
+    // Create vehicle object
+    const subscriptionStart = new Date();
+    const subscriptionEnd = new Date();
+    subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+
+    let washingDays = [];
+    let washFrequencyPerMonth = 8;
+    
+    const selectedScheduleType = scheduleType || 'schedule1';
+    
+    if (selectedPackage.name === 'Basic') {
+      washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
+      washFrequencyPerMonth = 8;
+    } else if (selectedPackage.name === 'Moderate' || selectedPackage.name === 'Classic') {
+      washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
+      washFrequencyPerMonth = 12;
+    }
+
+    const newVehicle = {
+      carModel: carModel.trim(),
+      vehicleNo: vehicleNo.trim().toUpperCase(),
+      carType: selectedPackage.carType || 'sedan',
+      packageId: packageId,
+      packageName: selectedPackage.name,
+      washerId: washerId || null,
+      washingSchedule: {
+        scheduleType: selectedScheduleType,
+        washingDays: washingDays,
+        washFrequencyPerMonth: washFrequencyPerMonth
+      },
+      subscriptionStart,
+      subscriptionEnd,
+      status: 'active'
+    };
+
+    // Add vehicle to customer
+    if (!customer.vehicles) {
+      customer.vehicles = [];
+    }
+    customer.vehicles.push(newVehicle);
+    
+    const updatedCustomer = await customer.save();
+    
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(200).json({ 
+      message: "Vehicle added successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error adding vehicle:', error);
+    res.status(500).json({ message: "Error adding vehicle", error: error.message });
+  }
+};
+
+// ✅ Update specific vehicle
+exports.updateVehicle = async (req, res) => {
+  try {
+    const { customerId, vehicleId } = req.params;
+    const updateData = req.body;
+
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Find and update the specific vehicle
+    const vehicleIndex = customer.vehicles.findIndex(v => v._id.toString() === vehicleId);
+    if (vehicleIndex === -1) {
+      return res.status(404).json({ message: "Vehicle not found" });
+    }
+
+    // Update vehicle fields
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] !== undefined) {
+        customer.vehicles[vehicleIndex][key] = updateData[key];
+      }
+    });
+
+    const updatedCustomer = await customer.save();
+    
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(200).json({ 
+      message: "Vehicle updated successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error updating vehicle:', error);
+    res.status(500).json({ message: "Error updating vehicle", error: error.message });
+  }
+};
+
+// ✅ Delete specific vehicle
+exports.deleteVehicle = async (req, res) => {
+  try {
+    const { customerId, vehicleId } = req.params;
+
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Remove the specific vehicle
+    customer.vehicles = customer.vehicles.filter(v => v._id.toString() !== vehicleId);
+    
+    const updatedCustomer = await customer.save();
+    
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(200).json({ 
+      message: "Vehicle deleted successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error deleting vehicle:', error);
+    res.status(500).json({ message: "Error deleting vehicle", error: error.message });
+  }
+};
+
+
+
+// ✅ Allocate washer to specific vehicle
+exports.allocateWasherToVehicle = async (req, res) => {
+  try {
+    const { customerId, vehicleId } = req.params;
+    const { washerId } = req.body;
+
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Find and update the specific vehicle's washer
+    const vehicleIndex = customer.vehicles.findIndex(v => v._id.toString() === vehicleId);
+    if (vehicleIndex === -1) {
+      return res.status(404).json({ message: "Vehicle not found" });
+    }
+
+    customer.vehicles[vehicleIndex].washerId = washerId;
+    
+    const updatedCustomer = await customer.save();
+    
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(200).json({ 
+      message: "Washer allocated successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error allocating washer:', error);
+    res.status(500).json({ message: "Error allocating washer", error: error.message });
+  }
+};
+
+// Add vehicle to existing customer
+exports.addVehicleToCustomer = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { vehicleNo, carModel, carType, packageId, scheduleType } = req.body;
+
+    // Validate required fields
+    if (!vehicleNo || !carModel || !packageId) {
+      return res.status(400).json({ 
+        message: "Vehicle number, car model, and package are required" 
+      });
+    }
+
+    // Check if customer exists
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Check if vehicle number already exists
+    const existingVehicle = await Customer.findOne({ 
+      $or: [
+        { vehicleNo: vehicleNo.trim() },
+        { "vehicles.vehicleNo": vehicleNo.trim() }
+      ]
+    });
+    
+    if (existingVehicle) {
+      return res.status(400).json({ 
+        message: `Vehicle number ${vehicleNo} already exists` 
+      });
+    }
+
+    // Get package details
+    const Package = require('../models/Package');
+    const selectedPackage = await Package.findById(packageId);
+    
+    if (!selectedPackage) {
+      return res.status(404).json({ message: "Package not found" });
+    }
+
+    // Calculate subscription dates
+    const subscriptionStart = new Date();
+    const subscriptionEnd = new Date();
+    subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+
+    // Determine washing schedule
+    let washingDays = [];
+    let washFrequencyPerMonth = 8;
+    
+    const selectedScheduleType = scheduleType || 'schedule1';
+    
+    if (selectedPackage.name === 'Basic') {
+      washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
+      washFrequencyPerMonth = 8;
+    } else if (selectedPackage.name === 'Moderate' || selectedPackage.name === 'Classic') {
+      washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
+      washFrequencyPerMonth = 12;
+    }
+
+    // Create new vehicle object
+    const newVehicle = {
+      carModel: carModel.trim(),
+      vehicleNo: vehicleNo.trim().toUpperCase(),
+      carType: carType || 'sedan',
+      packageId: packageId,
+      packageName: selectedPackage.name,
+      washerId: null,
+      washingSchedule: {
+        scheduleType: selectedScheduleType,
+        washingDays: washingDays,
+        washFrequencyPerMonth: washFrequencyPerMonth
+      },
+      subscriptionStart,
+      subscriptionEnd,
+      status: 'active'
+    };
+
+    // Add vehicle to customer's vehicles array
+    customer.vehicles.push(newVehicle);
+    
+    const updatedCustomer = await customer.save();
+    
+    // Populate vehicle package details
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(201).json({ 
+      message: "Vehicle added successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error adding vehicle:', error);
+    res.status(500).json({ message: "Error adding vehicle", error: error.message });
+  }
+};
+
+// Update vehicle details
+exports.updateVehicle = async (req, res) => {
+  try {
+    const { customerId, vehicleId } = req.params;
+    const { vehicleNo, carModel, carType, packageId, scheduleType } = req.body;
+
+    // Validate required fields
+    if (!vehicleNo || !carModel || !packageId) {
+      return res.status(400).json({ 
+        message: "Vehicle number, car model, and package are required" 
+      });
+    }
+
+    // Find customer
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Find vehicle in customer's vehicles array
+    const vehicleIndex = customer.vehicles.findIndex(v => v._id.toString() === vehicleId);
+    if (vehicleIndex === -1) {
+      return res.status(404).json({ message: "Vehicle not found" });
+    }
+
+    // Check if vehicle number already exists (excluding current vehicle)
+    const existingVehicle = await Customer.findOne({ 
+      $or: [
+        { vehicleNo: vehicleNo.trim() },
+        { "vehicles.vehicleNo": vehicleNo.trim() }
+      ],
+      $and: [
+        { 
+          $or: [
+            { _id: { $ne: customerId } },
+            { "vehicles._id": { $ne: vehicleId } }
+          ]
+        }
+      ]
+    });
+    
+    if (existingVehicle) {
+      return res.status(400).json({ 
+        message: `Vehicle number ${vehicleNo} already exists` 
+      });
+    }
+
+    // Get package details
+    const Package = require('../models/Package');
+    const selectedPackage = await Package.findById(packageId);
+    
+    if (!selectedPackage) {
+      return res.status(404).json({ message: "Package not found" });
+    }
+
+    // Determine washing schedule
+    let washingDays = [];
+    let washFrequencyPerMonth = 8;
+    
+    const selectedScheduleType = scheduleType || 'schedule1';
+    
+    if (selectedPackage.name === 'Basic') {
+      washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
+      washFrequencyPerMonth = 8;
+    } else if (selectedPackage.name === 'Moderate' || selectedPackage.name === 'Classic') {
+      washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
+      washFrequencyPerMonth = 12;
+    }
+
+    // Update vehicle details
+    customer.vehicles[vehicleIndex].carModel = carModel.trim();
+    customer.vehicles[vehicleIndex].vehicleNo = vehicleNo.trim().toUpperCase();
+    customer.vehicles[vehicleIndex].carType = carType || customer.vehicles[vehicleIndex].carType;
+    customer.vehicles[vehicleIndex].packageId = packageId;
+    customer.vehicles[vehicleIndex].packageName = selectedPackage.name;
+    customer.vehicles[vehicleIndex].washingSchedule = {
+      scheduleType: selectedScheduleType,
+      washingDays: washingDays,
+      washFrequencyPerMonth: washFrequencyPerMonth
+    };
+
+    const updatedCustomer = await customer.save();
+    
+    // Populate vehicle package details
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(200).json({ 
+      message: "Vehicle updated successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error updating vehicle:', error);
+    res.status(500).json({ message: "Error updating vehicle", error: error.message });
+  }
+};
+
+// Delete vehicle
+exports.deleteVehicle = async (req, res) => {
+  try {
+    const { customerId, vehicleId } = req.params;
+
+    // Find customer
+    const customer = await Customer.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    // Check if customer has only one vehicle
+    if (customer.vehicles.length <= 1) {
+      return res.status(400).json({ 
+        message: "Cannot delete the only vehicle. Customer must have at least one vehicle." 
+      });
+    }
+
+    // Find and remove vehicle
+    const vehicleIndex = customer.vehicles.findIndex(v => v._id.toString() === vehicleId);
+    if (vehicleIndex === -1) {
+      return res.status(404).json({ message: "Vehicle not found" });
+    }
+
+    // Remove vehicle from array
+    customer.vehicles.splice(vehicleIndex, 1);
+    
+    const updatedCustomer = await customer.save();
+    
+    // Populate remaining vehicle package details
+    const populatedCustomer = await Customer.findById(updatedCustomer._id)
+      .populate('vehicles.packageId')
+      .populate('vehicles.washerId');
+
+    res.status(200).json({ 
+      message: "Vehicle deleted successfully", 
+      customer: populatedCustomer 
+    });
+
+  } catch (error) {
+    console.error('Error deleting vehicle:', error);
+    res.status(500).json({ message: "Error deleting vehicle", error: error.message });
+  }
+}

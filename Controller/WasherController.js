@@ -106,19 +106,110 @@ exports.getWasherDashboard = async (req, res) => {
       customerQuery.carType = carType;
     }
 
-    // Get ALL customers assigned to this washer first
-    let allCustomers = await Customer.find({ washerId: washerId })
-      .populate("packageId");
+    // Get ALL customers assigned to this washer at customer level OR vehicle level
+    let allCustomers = await Customer.find({
+      $or: [
+        { washerId: washerId }, // Customer-level assignment
+        { "vehicles.washerId": washerId } // Vehicle-level assignment
+      ]
+    }).populate("packageId")
+      .populate("vehicles.packageId")
+      .populate("vehicles.washerId");
 
-    // Get unique apartments for dropdown (from all customers assigned to this washer)
-    const apartmentList = [...new Set(allCustomers.map(customer => customer.apartment))].filter(Boolean);
+    console.log(`🔍 Found ${allCustomers.length} customers for washer ${washerId}`);
+    allCustomers.forEach(customer => {
+      console.log(`🔍 Customer: ${customer.name}`);
+      console.log(`🔍 - Customer-level washerId: ${customer.washerId}`);
+      console.log(`🔍 - Vehicles count: ${customer.vehicles?.length || 0}`);
+      if (customer.vehicles) {
+        customer.vehicles.forEach((vehicle, idx) => {
+          console.log(`🔍 - Vehicle ${idx + 1}: ${vehicle.vehicleNo} - washerId: ${vehicle.washerId}`);
+        });
+      }
+    });
+
+    // Flatten the data - create separate entries for each vehicle assigned to this washer
+    let customerVehicleAssignments = [];
     
-    // Get unique car types for dropdown (from all customers assigned to this washer)
-    const carTypeList = [...new Set(allCustomers.map(customer => customer.carType))].filter(Boolean);
+    for (const customer of allCustomers) {
+      // Handle customer-level assignment (single vehicle customers)
+      const customerWasherId = customer.washerId?._id ? customer.washerId._id.toString() : customer.washerId?.toString();
+      if (customerWasherId && customerWasherId === washerId) {
+        customerVehicleAssignments.push({
+          _id: customer._id, // Customer ID for frontend compatibility
+          customerId: customer._id,
+          name: customer.name, // Use 'name' for frontend compatibility
+          customerName: customer.name,
+          mobileNo: customer.mobileNo,
+          email: customer.email,
+          apartment: customer.apartment,
+          doorNo: customer.doorNo,
+          // Vehicle info from customer level (backward compatibility)
+          vehicleId: customer._id, // Use customer ID as vehicle ID for single vehicles
+          carModel: customer.carModel,
+          vehicleNo: customer.vehicleNo,
+          carType: customer.carType,
+          packageId: customer.packageId,
+          packageName: customer.packageId ? customer.packageId.name : null,
+          washingSchedule: customer.washingSchedule,
+          subscriptionStart: customer.subscriptionStart,
+          subscriptionEnd: customer.subscriptionEnd,
+          assignmentType: 'customer-level'
+        });
+      }
+      
+      // Handle vehicle-level assignments (multi-vehicle customers)
+      if (customer.vehicles && customer.vehicles.length > 0) {
+        console.log(`🔍 Checking vehicles for customer: ${customer.name}`);
+        for (const vehicle of customer.vehicles) {
+          // Handle both ObjectId and populated object cases
+          const vehicleWasherId = vehicle.washerId?._id ? vehicle.washerId._id.toString() : vehicle.washerId?.toString();
+          console.log(`🔍 - Vehicle ${vehicle.vehicleNo}: washerId=${vehicleWasherId}, target=${washerId}`);
+          console.log(`🔍 - washerId type: ${typeof vehicle.washerId}, is object: ${typeof vehicle.washerId === 'object'}`);
+          if (vehicleWasherId && vehicleWasherId === washerId) {
+            console.log(`🔍 ✅ Match found! Adding vehicle ${vehicle.vehicleNo} to assignments`);
+            customerVehicleAssignments.push({
+              _id: `${customer._id}-${vehicle._id}`, // Unique ID combining customer and vehicle
+              customerId: customer._id,
+              name: customer.name, // Use 'name' for frontend compatibility
+              customerName: customer.name,
+              mobileNo: customer.mobileNo,
+              email: customer.email,
+              apartment: customer.apartment,
+              doorNo: customer.doorNo,
+              // Vehicle-specific info
+              vehicleId: vehicle._id,
+              carModel: vehicle.carModel,
+              vehicleNo: vehicle.vehicleNo,
+              carType: vehicle.carType,
+              packageId: vehicle.packageId,
+              packageName: vehicle.packageId ? vehicle.packageId.name : null,
+              washingSchedule: vehicle.washingSchedule,
+              subscriptionStart: vehicle.subscriptionStart,
+              subscriptionEnd: vehicle.subscriptionEnd,
+              assignmentType: 'vehicle-level'
+            });
+          }
+        }
+      }
+    }
 
-    // Now get filtered customers
-    let customers = await Customer.find(customerQuery)
-      .populate("packageId");
+    // Get unique apartments and car types for dropdown filters
+    const apartmentList = [...new Set(customerVehicleAssignments.map(assignment => assignment.apartment))].filter(Boolean);
+    const carTypeList = [...new Set(customerVehicleAssignments.map(assignment => assignment.carType))].filter(Boolean);
+
+    // Apply filters to the flattened assignments
+    let filteredAssignments = customerVehicleAssignments;
+
+    // Apply apartment filter
+    if (apartment && apartment !== 'all') {
+      filteredAssignments = filteredAssignments.filter(assignment => assignment.apartment === apartment);
+    }
+
+    // Apply carType filter
+    if (carType && carType !== 'all') {
+      filteredAssignments = filteredAssignments.filter(assignment => assignment.carType === carType);
+    }
 
     // Apply date filter based on washing schedule
     if (date && date !== 'all' && date !== 'today') {
@@ -133,35 +224,24 @@ exports.getWasherDashboard = async (req, res) => {
       console.log(`Parsed date (UTC): ${filterDate.toUTCString()}`);
       console.log(`Final day of week: ${dayOfWeek} (JS) -> ${washingScheduleDay} (washing schedule) (${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dayOfWeek]})`);
       
-      customers = customers.filter(customer => {
-        console.log(`Customer ${customer.name}:`, {
-          washingSchedule: customer.washingSchedule,
-          washingDays: customer.washingSchedule?.washingDays,
-          packageName: customer.packageName
+      filteredAssignments = filteredAssignments.filter(assignment => {
+        console.log(`Assignment ${assignment.customerName} - ${assignment.vehicleNo}:`, {
+          washingSchedule: assignment.washingSchedule,
+          washingDays: assignment.washingSchedule?.washingDays,
+          packageName: assignment.packageName
         });
         
-        if (!customer.washingSchedule || !customer.washingSchedule.washingDays || customer.washingSchedule.washingDays.length === 0) {
-          // For customers without schedule, calculate based on package
-          let defaultWashingDays = [];
-          
-          if (customer.packageName === 'Basic') {
-            // Default to schedule1 for existing customers
-            defaultWashingDays = [1, 4]; // Monday, Thursday
-          } else if (customer.packageName === 'Moderate' || customer.packageName === 'Classic') {
-            // Default to schedule1 for existing customers  
-            defaultWashingDays = [1, 3, 5]; // Monday, Wednesday, Friday
-          }
-          
-          console.log(`Using default schedule for ${customer.name}:`, defaultWashingDays);
-          return defaultWashingDays.includes(washingScheduleDay);
+        if (!assignment.washingSchedule || !assignment.washingSchedule.washingDays) {
+          console.log(`  ❌ No washing schedule found`);
+          return false;
         }
         
-        const hasWashOnDay = customer.washingSchedule.washingDays.includes(washingScheduleDay);
-        console.log(`${customer.name} has wash on ${washingScheduleDay}:`, hasWashOnDay);
-        return hasWashOnDay;
+        const hasWashToday = assignment.washingSchedule.washingDays.includes(washingScheduleDay);
+        console.log(`  📅 Checking day ${washingScheduleDay}: ${hasWashToday ? '✅ HAS WASH' : '❌ No wash'}`);
+        return hasWashToday;
       });
     } else if (date === 'today' || !date) {
-      // Default: show only customers who need wash today
+      // Default: show only assignments that need wash today
       const today = new Date();
       const todayDayOfWeek = today.getDay();
       
@@ -170,18 +250,18 @@ exports.getWasherDashboard = async (req, res) => {
       
       console.log(`Filtering for today: ${todayDayOfWeek} (JS) -> ${todayWashingScheduleDay} (washing schedule) (${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][todayDayOfWeek]})`);
       
-      customers = customers.filter(customer => {
+      filteredAssignments = filteredAssignments.filter(assignment => {
         let washingDays = [];
         
-        if (!customer.washingSchedule || !customer.washingSchedule.washingDays || customer.washingSchedule.washingDays.length === 0) {
-          // For customers without schedule, calculate based on package
-          if (customer.packageName === 'Basic') {
+        if (!assignment.washingSchedule || !assignment.washingSchedule.washingDays || assignment.washingSchedule.washingDays.length === 0) {
+          // For assignments without schedule, calculate based on package
+          if (assignment.packageName === 'Basic') {
             washingDays = [1, 4]; // Monday, Thursday
-          } else if (customer.packageName === 'Moderate' || customer.packageName === 'Classic') {
+          } else if (assignment.packageName === 'Moderate' || assignment.packageName === 'Classic') {
             washingDays = [1, 3, 5]; // Monday, Wednesday, Friday
           }
         } else {
-          washingDays = customer.washingSchedule.washingDays;
+          washingDays = assignment.washingSchedule.washingDays;
         }
         
         // Check if today is a washing day
@@ -190,8 +270,8 @@ exports.getWasherDashboard = async (req, res) => {
           return false;
         }
         
-        // Check if wash already completed today
-        const lastWash = customer.washingSchedule?.lastWashDate;
+        // Check if wash already completed today for this specific vehicle
+        const lastWash = assignment.washingSchedule?.lastWashDate;
         if (lastWash) {
           const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
           const lastWashStart = new Date(lastWash.getFullYear(), lastWash.getMonth(), lastWash.getDate());
@@ -205,9 +285,9 @@ exports.getWasherDashboard = async (req, res) => {
       });
     }
 
-    // Calculate wash counts and schedule info for each customer
-    const customersWithWashCounts = await Promise.all(
-      customers.map(async (customer) => {
+    // Calculate wash counts and schedule info for each assignment
+    const assignmentsWithWashCounts = await Promise.all(
+      filteredAssignments.map(async (assignment) => {
         // Calculate date range for current month
         const currentDate = new Date();
         const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
@@ -215,8 +295,8 @@ exports.getWasherDashboard = async (req, res) => {
         
         // Get total monthly washes from package
         let totalMonthlyWashes = 0;
-        if (customer.packageId) {
-          const packageName = customer.packageId.name;
+        if (assignment.packageId) {
+          const packageName = assignment.packageName;
           if (packageName === 'Basic') {
             totalMonthlyWashes = 8;
           } else if (packageName === 'Moderate') {
@@ -226,9 +306,10 @@ exports.getWasherDashboard = async (req, res) => {
           }
         }
         
-        // Count completed washes this month
+        // Count completed washes this month for this specific vehicle
         const completedWashes = await WashLog.countDocuments({
-          customerId: customer._id,
+          customerId: assignment.customerId,
+          vehicleId: assignment.vehicleId,
           washDate: {
             $gte: startOfMonth,
             $lte: endOfMonth
@@ -238,48 +319,11 @@ exports.getWasherDashboard = async (req, res) => {
         
         const pendingWashes = Math.max(0, totalMonthlyWashes - completedWashes);
 
-        // Calculate next wash date for customer
-        const today = new Date();
-        const todayDayOfWeek = today.getDay();
-        const washingDays = customer.washingSchedule?.washingDays || [];
-        
-        // Check if customer needs wash today
-        let needsWashToday = false;
-        if (washingDays.includes(todayDayOfWeek)) {
-          const lastWash = customer.washingSchedule?.lastWashDate;
-          if (!lastWash) {
-            needsWashToday = true;
-          } else {
-            const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-            const lastWashStart = new Date(lastWash.getFullYear(), lastWash.getMonth(), lastWash.getDate());
-            needsWashToday = lastWashStart.getTime() < todayStart.getTime();
-          }
-        }
-        
-        // Get washing days as day names
-        const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        const washingDayNames = washingDays.map(day => dayNames[day]);
-
         return {
-          _id: customer._id,
-          name: customer.name,
-          mobileNo: customer.mobileNo,
-          email: customer.email,
-          apartment: customer.apartment,
-          doorNo: customer.doorNo,
-          carModel: customer.carModel,
-          vehicleNo: customer.vehicleNo,
-          packageName: customer.packageId ? customer.packageId.name : null,
-          completedWashes,
+          ...assignment,
           pendingWashes,
-          totalMonthlyWashes,
-          // Schedule information
-          washingDays: washingDays,
-          washingDayNames,
-          nextWashDate: customer.washingSchedule?.nextWashDate,
-          lastWashDate: customer.washingSchedule?.lastWashDate,
-          needsWashToday: needsWashToday,
-          scheduleType: customer.washingSchedule?.scheduleType || 'schedule1'
+          completedWashes,
+          totalMonthlyWashes
         };
       })
     );
@@ -292,13 +336,14 @@ exports.getWasherDashboard = async (req, res) => {
         isAvailable: washer.isAvailable,
         status: washer.status
       },
-      customers: customersWithWashCounts,
-      apartments: apartmentList, // For apartment filter dropdown
-      carTypes: carTypeList, // For car type filter dropdown
-      totalCustomers: customersWithWashCounts.length,
+      customers: assignmentsWithWashCounts,
+      apartments: apartmentList,
+      carTypes: carTypeList,
+      totalCustomers: assignmentsWithWashCounts.length,
       filters: {
         date: date || 'today',
-        apartment: apartment || 'all'
+        apartment: apartment || 'all',
+        carType: carType || 'all'
       }
     });
   } catch (error) {
