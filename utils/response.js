@@ -13,3 +13,5 @@ exports.error = (res, message, data = null, status = 500) => {
     message
   });
 };
+
+

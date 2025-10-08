@@ -155,7 +155,7 @@ const getWashHistory = async (req, res) => {
 // ✅ Get all wash logs (for admin)
 const getAllWashLogs = async (req, res) => {
   try {
-    const { page = 1, limit = 10, status, washType } = req.query;
+    const { page = 1, limit = 5, status, washType } = req.query;
 
     let filter = {};
     if (status) filter.status = status;

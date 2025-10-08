@@ -1,8 +1,131 @@
 const Washer = require("../models/Washer");
-const WasherLog = require("../models/WasherLog");
+const WasherLog = require("../models/WashLog");
 const WashSchedule = require("../models/WashSchedule");
 const Customer = require("../models/Customer");
 const WashLog = require("../models/WashLog");
+
+exports.addWasher = async (req, res) => {
+  try {
+    const { name, mobileNo, email } = req.body;
+    if (!name || !mobileNo || !email) {
+      return res.status(400).json({ message: "Name, mobile number, and email are required" });
+    }
+    const newWasher = new Washer({ name, mobileNo, email });
+    const savedWasher = await newWasher.save();
+    res.status(201).json({ message: "Washer added successfully", washer: savedWasher });
+  } catch (error) {
+    res.status(500).json({ message: "Error adding washer", error: error.message });
+  }
+};
+
+
+exports.addWasher = async (req, res) => {
+  try {
+    console.log("Received washer request body:", JSON.stringify(req.body, null, 2));
+
+    const {
+      name,
+      mobileNo,
+      email,
+      status,
+      totalWashesCompleted
+    } = req.body;
+
+    // Validate required fields
+    if (!name || !mobileNo || !email) {
+      return res.status(400).json({ message: "Name, mobile number, and email are required" });
+    }
+
+    // Create new washer object
+    const newWasher = new Washer({
+      name,
+      mobileNo,
+      email
+    });
+
+    const savedWasher = await newWasher.save();
+
+    res.status(201).json({
+      message: "Washer added successfully",
+      washer: savedWasher
+    });
+  } catch (error) {
+    console.error("Error adding washer:", error);
+    res.status(500).json({ message: "Error adding washer", error });
+  }
+};
+ 
+
+// ✅ Get washers with pagination
+exports.getAllWasher = async (req, res) => {
+  try {
+    // Get page and limit from query parameters (default: page=1, limit=10)
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+
+    // Calculate how many to skip
+    const skip = (page - 1) * limit;
+
+    // Count total washers
+    const total = await Washer.countDocuments();
+
+    // Fetch paginated washers
+    const washers = await Washer.find()
+      .skip(skip)
+      .limit(limit)
+      .sort({ name: 1 }); // optional alphabetical sort
+
+    // Send response
+    res.status(200).json({
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+      totalItems: total,
+      data: washers,
+    });
+  } catch (error) {
+    console.error("Error fetching washers:", error);
+    res.status(500).json({ message: "Error fetching washers", error });
+  }
+};
+
+
+
+// ✅ Get single washer by ID
+exports.getWasherById = async (req, res) => {
+  try {
+    const washer = await Washer.findById(req.params.id);
+    if (!washer) return res.status(404).json({ message: "Washer not found" });
+    res.status(200).json(washer);
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching washer", error });
+  }
+};
+
+// ✅ Update washer
+exports.updateWasher = async (req, res) => {
+  try {
+    const updatedWasher = await Washer.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!updatedWasher) return res.status(404).json({ message: "Washer not found" });
+    res.status(200).json({
+      message: "Washer updated successfully",
+      washer: updatedWasher
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error updating washer", error });
+  }
+};
+
+// ✅ Delete washer
+exports.deleteWasher = async (req, res) => {
+  try {
+    const deletedWasher = await Washer.findByIdAndDelete(req.params.id);
+    if (!deletedWasher) return res.status(404).json({ message: "Washer not found" });
+    res.status(200).json({ message: "Washer deleted successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Error deleting washer", error });
+  }
+};
+
 
 // ✅ Get all washers
 exports.getAllWashers = async (req, res) => {
@@ -392,5 +515,41 @@ exports.completeWash = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Error completing wash", error: error.message });
+  }
+};
+
+
+
+// ✅ Add new washer (backend only)
+exports.addnewWasher = async (req, res) => {
+  try {
+    const { name, mobileNo, email } = req.body;
+
+    // Validate required fields
+    if (!name || !mobileNo || !email) {
+      return res.status(400).json({ message: "Name, mobile number, and email are required" });
+    }
+
+    // Optionally, check for duplicate email or mobileNo
+    const existing = await Washer.findOne({ $or: [{ email }, { mobileNo }] });
+    if (existing) {
+      return res.status(409).json({ message: "Washer with this email or mobile number already exists" });
+    }
+
+    // Create new washer object (without status and totalWashesCompleted)
+    const newWasher = new Washer({
+      name,
+      mobileNo,
+      email
+    });
+
+    const savedWasher = await newWasher.save();
+
+    res.status(201).json({
+      message: "Washer created successfully!",
+      washer: savedWasher
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error creating washer", error: error.message });
   }
 };

@@ -23,9 +23,9 @@ function buildFilters(query) {
 
 exports.getAllUsers = async (req, res) => {
   try {
-    let { page = 1, limit = 10, sortBy = "-createdAt" } = req.query;
+    let { page = 1, limit = 5, sortBy = "-createdAt" } = req.query;
     page = Number(page) || 1;
-    limit = Number(limit) || 10;
+    limit = Number(limit) || 5;
 
     const filter = buildFilters(req.query);
     const total = await User.countDocuments(filter);
@@ -80,15 +80,6 @@ exports.updateUser = async (req, res) => {
   }
 };
 
-// exports.softDeleteUser = async (req, res) => {
-//   try {
-//     const user = await User.findByIdAndUpdate(req.params.id, { isDeleted: true }, { new: true });
-//     if (!user) return res.status(404).json(errorResponse("User not found"));
-//     res.json(successResponse("User deleted (soft)", user));
-//   } catch (err) {
-//     res.status(500).json(errorResponse("Error deleting user", err.message));
-//   }
-// };
 
 exports.deleteUser = async (req, res) => {
   try {

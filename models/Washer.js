@@ -41,6 +41,19 @@ const washerSchema = new mongoose.Schema({
     enum: ["active", "inactive", "on-leave", "busy"], 
     default: "active" 
   },
+  //
+  currentLocation: {
+  type: {
+    type: String,
+    enum: ["Point"],
+    default: "Point",
+  },
+  coordinates: {
+    type: [Number],
+    default: [0, 0],
+  },
+},
+
   
   // Equipment and supplies
   hasEquipment: { type: Boolean, default: true },
@@ -54,5 +67,7 @@ const washerSchema = new mongoose.Schema({
 washerSchema.index({ currentLocation: "2dsphere" });
 washerSchema.index({ assignedApartments: 1 });
 washerSchema.index({ status: 1, isAvailable: 1 });
+
+
 
 module.exports = mongoose.model("Washer", washerSchema);
