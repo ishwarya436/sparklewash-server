@@ -21,7 +21,7 @@ const EmployeeRoutes = require("./routes/employeeRoutes");
 const userRoutes = require("./routes/userRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const customerRoutes = require("./routes/CustomerRoutes");
-const washerRoutes = require("./routes/WasherRoutes"); // <-- THIS IS THE CORRECT IMPORT
+const washerRoutes = require("./routes/WasherRoutes"); 
 const packageRoutes = require("./routes/PackageRoutes");
 
 
@@ -30,9 +30,9 @@ app.use("/api/auth", authRoutes);
 app.use("/api/employees", EmployeeRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/dashboard", dashboardRoutes);
-app.use("/api/customers", customerRoutes);
+app.use("/api/customer", customerRoutes);
 app.use("/api/package", packageRoutes);
-app.use("/api/washers", washerRoutes); // <-- THIS IS THE CORRECT USAGE
+app.use("/api/washer", washerRoutes);
  
 
 
