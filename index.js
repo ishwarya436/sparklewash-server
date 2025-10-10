@@ -10,7 +10,7 @@ require("dotenv").config();
 const app = express();
 
 // Middleware
-app.use(cors({ origin: "http://localhost:5173", credentials: true }));
+app.use(cors({ origin: "*", credentials: true }));
 app.use(express.json());
 app.use(cookieParser());
 
@@ -22,6 +22,7 @@ const userRoutes = require("./routes/userRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const customerRoutes = require("./routes/CustomerRoutes");
 const washerRoutes = require("./routes/WasherRoutes"); // <-- THIS IS THE CORRECT IMPORT
+const packageRoutes = require("./routes/PackageRoutes");
 
 
 // Routes
@@ -30,6 +31,7 @@ app.use("/api/employees", EmployeeRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customers", customerRoutes);
+app.use("/api/package", packageRoutes);
 app.use("/api/washers", washerRoutes); // <-- THIS IS THE CORRECT USAGE
  
 
