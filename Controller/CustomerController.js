@@ -7,8 +7,63 @@ const mongoose = require("mongoose");
 const XLSX = require('xlsx');
 
 // Helper function to calculate wash counts for a customer
-const calculateWashCounts = async (customer) => {
+const calculateWashCounts = async (customer, vehicleId = null) => {
   try {
+    // If vehicleId is provided, calculate for specific vehicle
+    if (vehicleId) {
+      const vehicle = customer.vehicles?.find(v => v._id.toString() === vehicleId.toString());
+      if (!vehicle || !vehicle.packageId) {
+        return { completed: 0, pending: 0, total: 0 };
+      }
+      
+      // Calculate total washes for current month based on vehicle's package
+      let totalMonthlyWashes = 0;
+      const packageName = vehicle.packageId.name || vehicle.packageName;
+      
+      if (packageName === 'Basic') {
+        totalMonthlyWashes = 8; // 2 times per week * 4 weeks
+      } else if (packageName === 'Moderate') {
+        totalMonthlyWashes = 12; // 3 times per week * 4 weeks
+      } else if (packageName === 'Classic') {
+        totalMonthlyWashes = 12; // 3 times per week * 4 weeks (exterior only)
+      }
+      
+      // Calculate date range for current month
+      const currentDate = new Date();
+      const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+      const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+      
+      // Count completed washes this month for this specific vehicle
+      const completedWashes = await WashLog.countDocuments({
+        customerId: customer._id,
+        vehicleId: vehicle._id,
+        washDate: {
+          $gte: startOfMonth,
+          $lte: endOfMonth
+        },
+        status: 'completed'
+      });
+      
+      // Calculate pending washes
+      const pendingWashes = Math.max(0, totalMonthlyWashes - completedWashes);
+      
+      console.log('🔍 Vehicle wash counts:', {
+        vehicleId: vehicle._id,
+        vehicleNo: vehicle.vehicleNo,
+        packageName,
+        totalMonthlyWashes,
+        completedWashes,
+        pendingWashes
+      });
+      
+      return {
+        completed: completedWashes,
+        pending: pendingWashes,
+        total: totalMonthlyWashes
+      };
+    }
+    
+    // Original logic for single-vehicle customers
     if (!customer.packageId) return { completed: 0, pending: 0, total: 0 };
     
     // Calculate total washes for current month based on package
@@ -28,7 +83,7 @@ const calculateWashCounts = async (customer) => {
     const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
     const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
     
-    // Count completed washes this month
+    // Count completed washes this month (without vehicleId filter for single-vehicle customers)
     const completedWashes = await WashLog.countDocuments({
       customerId: customer._id,
       washDate: {
@@ -52,52 +107,7 @@ const calculateWashCounts = async (customer) => {
   }
 };
 
-// Helper function to calculate wash counts for individual vehicles
-const calculateVehicleWashCounts = async (customerId, vehicle) => {
-  try {
-    if (!vehicle.packageId) return { completed: 0, pending: 0, total: 0 };
-    
-    // Calculate total washes for current month based on package
-    let totalMonthlyWashes = 0;
-    const packageName = vehicle.packageId.name;
-    
-    if (packageName === 'Basic') {
-      totalMonthlyWashes = 8; // 2 times per week * 4 weeks
-    } else if (packageName === 'Moderate') {
-      totalMonthlyWashes = 12; // 3 times per week * 4 weeks
-    } else if (packageName === 'Classic') {
-      totalMonthlyWashes = 12; // 3 times per week * 4 weeks (exterior only)
-    }
-    
-    // Calculate date range for current month
-    const currentDate = new Date();
-    const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
-    const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
-    
-    // Count completed washes this month for this specific vehicle
-    const completedWashes = await WashLog.countDocuments({
-      customerId: customerId,
-      vehicleId: vehicle._id,
-      washDate: {
-        $gte: startOfMonth,
-        $lte: endOfMonth
-      },
-      status: 'completed'
-    });
-    
-    // Calculate pending washes
-    const pendingWashes = Math.max(0, totalMonthlyWashes - completedWashes);
-    
-    return {
-      completed: completedWashes,
-      pending: pendingWashes,
-      total: totalMonthlyWashes
-    };
-  } catch (error) {
-    console.error('Error calculating vehicle wash counts:', error);
-    return { completed: 0, pending: 0, total: 0 };
-  }
-};
+
 
 // ✅ Get all customers with package & washer details + wash counts (Multi-vehicle support)
 exports.getAllCustomers = async (req, res) => {
@@ -118,7 +128,7 @@ exports.getAllCustomers = async (req, res) => {
           // Calculate wash counts for each vehicle individually
           const vehiclesWithWashCounts = await Promise.all(
             customer.vehicles.map(async (vehicle) => {
-              const vehicleWashCounts = await calculateVehicleWashCounts(customer._id, vehicle);
+              const vehicleWashCounts = await calculateWashCounts(customer, vehicle._id);
               aggregateWashCounts.completed += vehicleWashCounts.completed;
               aggregateWashCounts.pending += vehicleWashCounts.pending;
               aggregateWashCounts.total += vehicleWashCounts.total;
@@ -741,59 +751,113 @@ exports.getCustomerWashHistory = async (req, res) => {
   }
 };
 
-// ✅ Complete a wash for a customer
+// ✅ Complete a wash for a customer (supports both single and multi-vehicle)
 exports.completeWash = async (req, res) => {
   try {
-    const { customerId, washerId, washerName } = req.body;
+    const { customerId, washerId, washerName, vehicleId } = req.body;
+
+    console.log('🔍 Complete wash request:', { customerId, washerId, washerName, vehicleId });
 
     // Validate required fields
     if (!customerId || !washerId) {
       return res.status(400).json({ message: "Customer ID and Washer ID are required" });
     }
 
+    // For multi-vehicle customers, the customerId might be in format "customerId-vehicleId"
+    let actualCustomerId = customerId;
+    let actualVehicleId = vehicleId;
+    
+    // Check if customerId contains vehicle ID (format: "customerId-vehicleId")
+    if (customerId.includes('-') && !vehicleId) {
+      const parts = customerId.split('-');
+      if (parts.length === 2) {
+        actualCustomerId = parts[0];
+        actualVehicleId = parts[1];
+        console.log('🔍 Detected multi-vehicle format:', { actualCustomerId, actualVehicleId });
+      }
+    }
+
     // Validate ObjectIds
-    if (!mongoose.Types.ObjectId.isValid(customerId) || !mongoose.Types.ObjectId.isValid(washerId)) {
+    if (!mongoose.Types.ObjectId.isValid(actualCustomerId) || !mongoose.Types.ObjectId.isValid(washerId)) {
       return res.status(400).json({ message: "Invalid Customer ID or Washer ID" });
     }
 
-    // Check if customer exists and is assigned to this washer
-    const customer = await Customer.findById(customerId).populate('packageId');
+    if (actualVehicleId && !mongoose.Types.ObjectId.isValid(actualVehicleId)) {
+      return res.status(400).json({ message: "Invalid Vehicle ID" });
+    }
+
+    // Check if customer exists
+    const customer = await Customer.findById(actualCustomerId).populate('packageId').populate('vehicles.packageId');
     if (!customer) {
       return res.status(404).json({ message: "Customer not found" });
     }
 
-    if (customer.washerId && customer.washerId.toString() !== washerId) {
-      return res.status(403).json({ message: "Customer is not assigned to this washer" });
+    console.log('🔍 Customer found:', { name: customer.name, vehiclesCount: customer.vehicles?.length || 0 });
+
+    let targetVehicle = null;
+    let packageInfo = null;
+    
+    // Handle multi-vehicle customers
+    if (actualVehicleId) {
+      console.log('🔍 Multi-vehicle customer - looking for vehicle:', actualVehicleId);
+      targetVehicle = customer.vehicles?.find(v => v._id.toString() === actualVehicleId);
+      if (!targetVehicle) {
+        return res.status(404).json({ message: "Vehicle not found" });
+      }
+      
+      // Check if this vehicle is assigned to this washer
+      const vehicleWasherId = targetVehicle.washerId?.toString();
+      if (!vehicleWasherId || vehicleWasherId !== washerId) {
+        console.log('🔍 Vehicle washer mismatch:', { vehicleWasherId, washerId });
+        return res.status(403).json({ message: "Vehicle is not assigned to this washer" });
+      }
+      
+      packageInfo = targetVehicle.packageId || targetVehicle.packageName;
+      console.log('🔍 Multi-vehicle wash completion for:', targetVehicle.vehicleNo);
+    } else {
+      // Handle single-vehicle customers (backward compatibility)
+      console.log('🔍 Single-vehicle customer');
+      if (customer.washerId && customer.washerId.toString() !== washerId) {
+        console.log('🔍 Customer washer mismatch:', { customerWasherId: customer.washerId?.toString(), washerId });
+        return res.status(403).json({ message: "Customer is not assigned to this washer" });
+      }
+      packageInfo = customer.packageId;
     }
 
-    // Calculate current wash counts
-    const washCounts = await calculateWashCounts(customer);
+    // Calculate current wash counts (for specific vehicle if multi-vehicle)
+    const washCounts = targetVehicle 
+      ? await calculateWashCounts(customer, actualVehicleId)
+      : await calculateWashCounts(customer);
     
-    // Check if customer has pending washes
+    // Check if has pending washes
     if (washCounts.pending <= 0) {
-      return res.status(400).json({ message: "Customer has no pending washes for this month" });
+      return res.status(400).json({ message: "No pending washes for this month" });
     }
 
     // Determine wash type based on package
     let washType = "exterior"; // default
-    if (customer.packageId?.name) {
-      const packageName = customer.packageId.name.toLowerCase();
-      if (packageName.includes("classic") || packageName.includes("premium")) {
+    const packageName = packageInfo?.name || packageInfo;
+    if (packageName) {
+      const pkgName = packageName.toLowerCase();
+      if (pkgName.includes("classic") || pkgName.includes("premium")) {
         washType = "both";
-      } else if (packageName.includes("moderate")) {
+      } else if (pkgName.includes("moderate")) {
         washType = "exterior";
       }
     }
 
     // Create wash log entry with all required fields
     const washLog = new WashLog({
-      customerId: customerId,
+      customerId: actualCustomerId,
+      vehicleId: actualVehicleId || null, // Include vehicle ID for multi-vehicle customers
       washerId: washerId,
-      packageId: customer.packageId?._id,
+      packageId: packageInfo?._id || packageInfo?.packageId,
       washDate: new Date(),
       washType: washType,
       apartment: customer.apartment || 'Not specified',
       doorNo: customer.doorNo || 'Not specified',
+      vehicleNo: targetVehicle?.vehicleNo || customer.vehicleNo,
+      carModel: targetVehicle?.carModel || customer.carModel,
       status: 'completed',
       washerNotes: `Completed by ${washerName || 'Washer'}`,
       servicesCompleted: {
@@ -806,12 +870,20 @@ exports.completeWash = async (req, res) => {
 
     await washLog.save();
 
-    // Update customer's last wash date
-    customer.washingSchedule.lastWashDate = new Date();
+    // Update last wash date
+    if (targetVehicle) {
+      // Update specific vehicle's last wash date
+      targetVehicle.washingSchedule.lastWashDate = new Date();
+    } else {
+      // Update customer's last wash date (single vehicle)
+      customer.washingSchedule.lastWashDate = new Date();
+    }
     await customer.save();
 
     // Calculate updated wash counts
-    const updatedWashCounts = await calculateWashCounts(customer);
+    const updatedWashCounts = targetVehicle 
+      ? await calculateWashCounts(customer, actualVehicleId)
+      : await calculateWashCounts(customer);
 
     res.status(200).json({
       message: "Wash completed successfully",
@@ -833,19 +905,58 @@ exports.exportCustomerTemplate = async (req, res) => {
     // Get all packages for reference
     const packages = await Package.find();
 
-    // Create template data structure - use actual values for the sample row
+    // Create template data structure - horizontal multi-vehicle format (exact match to image)
     const templateData = [
       {
+        // Customer Info
         name: 'John Doe',
         mobileNo: '1234567890',
         email: 'john@example.com',
         apartment: 'ABC Apartments',
         doorNo: '101',
-        carModel: 'Honda City',
-        carType: 'sedan',
-        vehicleNo: 'TN01AB1234',
-        packageName: 'Basic',
-        scheduleType: 'schedule1'
+        // Vehicle 1
+        vehicleNo1: 'TN01AB1234',
+        carModel1: 'Honda City',
+        carType1: 'sedan',
+        packageName1: 'Basic',
+        scheduleType1: 'schedule1',
+        // Vehicle 2
+        vehicleNo2: 'TN01AB5678',
+        carModel2: 'Honda CRV',
+        carType2: 'suv',
+        packageName2: 'Moderate',
+        scheduleType2: 'schedule1',
+        // Vehicle 3 (empty)
+        vehicleNo3: '',
+        carModel3: '',
+        carType3: '',
+        packageName3: '',
+        scheduleType3: ''
+      },
+      {
+        // Customer Info
+        name: 'Jane Smith',
+        mobileNo: '9876543210',
+        email: 'jane@example.com',
+        apartment: 'XYZ Complex',
+        doorNo: '202',
+        // Vehicle 1
+        vehicleNo1: 'KA02CD9999',
+        carModel1: 'Maruti Swift',
+        carType1: 'sedan',
+        packageName1: 'Classic',
+        scheduleType1: 'schedule2',
+        // Vehicle 2 & 3 (empty)
+        vehicleNo2: '',
+        carModel2: '',
+        carType2: '',
+        packageName2: '',
+        scheduleType2: '',
+        vehicleNo3: '',
+        carModel3: '',
+        carType3: '',
+        packageName3: '',
+        scheduleType3: ''
       }
     ];
 
@@ -853,18 +964,31 @@ exports.exportCustomerTemplate = async (req, res) => {
     const workbook = XLSX.utils.book_new();
     const worksheet = XLSX.utils.json_to_sheet(templateData);
 
-    // Auto-size columns to make headers fully visible
+    // Auto-size columns to make headers fully visible (horizontal format)
     const columnWidths = [
       { wch: 15 }, // name
       { wch: 12 }, // mobileNo
       { wch: 25 }, // email
       { wch: 20 }, // apartment
       { wch: 10 }, // doorNo
-      { wch: 15 }, // carModel
-      { wch: 12 }, // carType
-      { wch: 15 }, // vehicleNo
-      { wch: 15 }, // packageName
-      { wch: 15 }  // scheduleType
+      // Vehicle 1
+      { wch: 15 }, // vehicleNo1
+      { wch: 15 }, // carModel1
+      { wch: 12 }, // carType1
+      { wch: 15 }, // packageName1
+      { wch: 15 }, // scheduleType1
+      // Vehicle 2
+      { wch: 15 }, // vehicleNo2
+      { wch: 15 }, // carModel2
+      { wch: 12 }, // carType2
+      { wch: 15 }, // packageName2
+      { wch: 15 }, // scheduleType2
+      // Vehicle 3
+      { wch: 15 }, // vehicleNo3
+      { wch: 15 }, // carModel3
+      { wch: 12 }, // carType3
+      { wch: 15 }, // packageName3
+      { wch: 15 }  // scheduleType3
     ];
     worksheet['!cols'] = columnWidths;
 
@@ -873,36 +997,39 @@ exports.exportCustomerTemplate = async (req, res) => {
       worksheet['!dataValidation'] = {};
     }
 
-    // CarType dropdown validation for rows 2 to 1000 (column G)
+    // Add dropdowns for all 3 vehicles in horizontal format
     for (let i = 2; i <= 1000; i++) {
-      const cellAddress = XLSX.utils.encode_cell({ r: i - 1, c: 6 }); // Column G (0-indexed: 6)
-      worksheet['!dataValidation'][cellAddress] = {
-        type: 'list',
-        allowBlank: false,
-        showDropDown: true,
-        formula1: '"sedan,suv,premium"'
+      // Vehicle 1 dropdowns (columns H=7, I=8, J=9)
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 7 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"sedan,suv,premium"'
       };
-    }
-
-    // PackageName dropdown validation for rows 2 to 1000 (column I)
-    for (let i = 2; i <= 1000; i++) {
-      const cellAddress = XLSX.utils.encode_cell({ r: i - 1, c: 8 }); // Column I (0-indexed: 8)
-      worksheet['!dataValidation'][cellAddress] = {
-        type: 'list',
-        allowBlank: false,
-        showDropDown: true,
-        formula1: '"Basic,Moderate,Classic"'
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 8 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"Basic,Moderate,Classic"'
       };
-    }
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 9 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"schedule1,schedule2"'
+      };
 
-    // ScheduleType dropdown validation for rows 2 to 1000 (column J)
-    for (let i = 2; i <= 1000; i++) {
-      const cellAddress = XLSX.utils.encode_cell({ r: i - 1, c: 9 }); // Column J (0-indexed: 9)
-      worksheet['!dataValidation'][cellAddress] = {
-        type: 'list',
-        allowBlank: false,
-        showDropDown: true,
-        formula1: '"schedule1,schedule2"'
+      // Vehicle 2 dropdowns (columns M=12, N=13, O=14)
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 12 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"sedan,suv,premium"'
+      };
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 13 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"Basic,Moderate,Classic"'
+      };
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 14 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"schedule1,schedule2"'
+      };
+
+      // Vehicle 3 dropdowns (columns R=17, S=18, T=19)
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 17 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"sedan,suv,premium"'
+      };
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 18 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"Basic,Moderate,Classic"'
+      };
+      worksheet['!dataValidation'][XLSX.utils.encode_cell({ r: i - 1, c: 19 })] = {
+        type: 'list', allowBlank: true, showDropDown: true, formula1: '"schedule1,schedule2"'
       };
     }
 
@@ -1081,14 +1208,14 @@ exports.exportCustomerTemplate = async (req, res) => {
   }
 };
 
-// ✅ Bulk import customers from Excel
+// ✅ Bulk import customers from Excel (Horizontal Multi-vehicle Format)
 exports.bulkImportCustomers = async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ message: "No file uploaded" });
     }
 
-    // Read the Excel file
+    // Read the Excel file (horizontal format)
     const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
     const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const jsonData = XLSX.utils.sheet_to_json(worksheet);
@@ -1098,28 +1225,33 @@ exports.bulkImportCustomers = async (req, res) => {
     }
 
     const results = {
-      total: jsonData.length,
-      successful: 0,
-      failed: 0,
+      totalRows: jsonData.length,
+      successfulCustomers: 0,
+      failedRows: 0,
+      totalVehicles: 0,
       errors: []
     };
 
-    // Get all packages for reference (removed washers since we don't need them)
+    // Get all packages for reference
     const packages = await Package.find();
 
+    // Track vehicle numbers in this batch to prevent duplicates
+    const usedVehicleNumbers = new Set();
+
+    // Process each row (horizontal format)
     for (let i = 0; i < jsonData.length; i++) {
       const row = jsonData[i];
       const rowNumber = i + 2; // Excel row number (accounting for header)
 
       try {
-        // Validate required fields
-        if (!row.name || !row.mobileNo || !row.apartment || !row.doorNo || 
-            !row.carModel || !row.vehicleNo || !row.packageName) {
-          throw new Error('Missing required fields');
+        // Validate required customer fields
+        if (!row.name || !row.mobileNo || !row.apartment || !row.doorNo) {
+          throw new Error('Missing required customer fields: name, mobileNo, apartment, doorNo');
         }
 
         // Validate mobile number
-        if (!/^\d{10}$/.test(row.mobileNo.toString().trim())) {
+        const mobileNo = row.mobileNo.toString().trim();
+        if (!/^\d{10}$/.test(mobileNo)) {
           throw new Error('Mobile number must be 10 digits');
         }
 
@@ -1128,88 +1260,159 @@ exports.bulkImportCustomers = async (req, res) => {
           throw new Error('Invalid email format');
         }
 
-        // Find package
-        const selectedPackage = packages.find(pkg => 
-          pkg.name.toLowerCase() === row.packageName.toLowerCase()
-        );
-        if (!selectedPackage) {
-          throw new Error(`Package '${row.packageName}' not found`);
+        // Check if customer already exists
+        const existingCustomer = await Customer.findOne({ mobileNo: mobileNo });
+        if (existingCustomer) {
+          throw new Error(`Customer with mobile number ${mobileNo} already exists`);
         }
 
-        // Validate carType
-        if (!['sedan', 'suv', 'premium'].includes(row.carType?.toLowerCase())) {
-          throw new Error('carType must be sedan, suv, or premium');
-        }
+        console.log(`Processing customer: ${row.name} (${mobileNo}) - Row ${rowNumber}`);
 
-        // Validate scheduleType
-        if (!['schedule1', 'schedule2'].includes(row.scheduleType)) {
-          throw new Error('scheduleType must be schedule1 or schedule2');
-        }
-
-        // Check if vehicle number already exists
-        const existingVehicle = await Customer.findOne({ vehicleNo: row.vehicleNo.trim() });
-        if (existingVehicle) {
-          throw new Error(`Vehicle number ${row.vehicleNo} already exists`);
-        }
-
-        // Calculate subscription dates
-        const subscriptionStart = new Date();
-        const subscriptionEnd = new Date();
-        subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
-
-        // Determine washing schedule
-        let washingDays = [];
-        let washFrequencyPerMonth = 8;
+        // Process vehicles from horizontal format (vehicleNo1, vehicleNo2, vehicleNo3)
+        const processedVehicles = [];
         
-        if (row.packageName === 'Basic') {
-          washingDays = row.scheduleType === 'schedule1' ? [1, 4] : [2, 6];
-          washFrequencyPerMonth = 8;
-        } else if (row.packageName === 'Moderate' || row.packageName === 'Classic') {
-          washingDays = row.scheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
-          washFrequencyPerMonth = 12;
+        // Check each vehicle column (1, 2, 3)
+        for (let vehicleNum = 1; vehicleNum <= 3; vehicleNum++) {
+          const vehicleNoField = `vehicleNo${vehicleNum}`;
+          const carModelField = `carModel${vehicleNum}`;
+          const carTypeField = `carType${vehicleNum}`;
+          const packageNameField = `packageName${vehicleNum}`;
+          const scheduleTypeField = `scheduleType${vehicleNum}`;
+          
+          const vehicleNo = row[vehicleNoField]?.toString().trim();
+          
+          // Skip if no vehicle number (vehicle columns can be empty)
+          if (!vehicleNo) {
+            console.log(`  Vehicle ${vehicleNum}: Skipped (no vehicle number)`);
+            continue;
+          }
+          
+          const normalizedVehicleNo = vehicleNo.toUpperCase().trim();
+          console.log(`  Processing Vehicle ${vehicleNum}: ${vehicleNo} -> ${normalizedVehicleNo}`);
+          
+          // Check for duplicates within this batch
+          if (usedVehicleNumbers.has(normalizedVehicleNo)) {
+            throw new Error(`Vehicle ${vehicleNum}: Vehicle number ${vehicleNo} appears multiple times in this import batch`);
+          }
+          usedVehicleNumbers.add(normalizedVehicleNo);
+          
+          const carModel = row[carModelField]?.toString().trim();
+          const carType = row[carTypeField]?.toString().trim().toLowerCase();
+          const packageName = row[packageNameField]?.toString().trim();
+          const scheduleType = row[scheduleTypeField]?.toString().trim();
+          
+          // Validate required vehicle fields
+          if (!carModel || !packageName || !scheduleType) {
+            throw new Error(`Vehicle ${vehicleNum}: Missing required fields (carModel, packageName, scheduleType)`);
+          }
+
+          // Find package
+          const selectedPackage = packages.find(pkg => 
+            pkg.name.toLowerCase() === packageName.toLowerCase()
+          );
+          if (!selectedPackage) {
+            throw new Error(`Vehicle ${vehicleNum}: Package '${packageName}' not found`);
+          }
+
+          // Validate carType
+          if (!['sedan', 'suv', 'premium'].includes(carType)) {
+            throw new Error(`Vehicle ${vehicleNum}: carType must be sedan, suv, or premium`);
+          }
+
+          // Validate scheduleType
+          if (!['schedule1', 'schedule2'].includes(scheduleType)) {
+            throw new Error(`Vehicle ${vehicleNum}: scheduleType must be schedule1 or schedule2`);
+          }
+
+          // Check if vehicle number already exists in database (case-insensitive and trimmed)
+          console.log(`    Checking database for existing vehicle: ${normalizedVehicleNo}`);
+          const existingVehicle = await Customer.findOne({ 
+            $or: [
+              { vehicleNo: { $regex: new RegExp(`^${normalizedVehicleNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+              { "vehicles.vehicleNo": { $regex: new RegExp(`^${normalizedVehicleNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+            ]
+          });
+          if (existingVehicle) {
+            console.log(`    ❌ Vehicle number conflict found: ${vehicleNo} matches existing vehicle in customer: ${existingVehicle.name}`);
+            throw new Error(`Vehicle ${vehicleNum}: Vehicle number ${vehicleNo} already exists in database`);
+          } else {
+            console.log(`    ✅ Vehicle number ${normalizedVehicleNo} is available`);
+          }
+
+          // Calculate subscription dates
+          const subscriptionStart = new Date();
+          const subscriptionEnd = new Date();
+          subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+
+          // Determine washing schedule
+          let washingDays = [];
+          let washFrequencyPerMonth = 8;
+          
+          if (packageName === 'Basic') {
+            washingDays = scheduleType === 'schedule1' ? [1, 4] : [2, 6];
+            washFrequencyPerMonth = 8;
+          } else if (packageName === 'Moderate' || packageName === 'Classic') {
+            washingDays = scheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
+            washFrequencyPerMonth = 12;
+          }
+
+          // Create vehicle data
+          const vehicleData = {
+            carModel: carModel,
+            vehicleNo: normalizedVehicleNo,
+            carType: carType,
+            packageId: selectedPackage._id,
+            packageName: selectedPackage.name,
+            washerId: null,
+            washingSchedule: {
+              scheduleType: scheduleType,
+              washingDays: washingDays,
+              washFrequencyPerMonth: washFrequencyPerMonth
+            },
+            subscriptionStart,
+            subscriptionEnd,
+            status: 'active'
+          };
+
+          processedVehicles.push(vehicleData);
         }
 
-        // Create customer data
-        const customerData = {
+        // Ensure at least one vehicle exists
+        if (processedVehicles.length === 0) {
+          throw new Error('At least one vehicle is required (vehicleNo1 must be filled)');
+        }
+
+        // Create customer with vehicles
+        const newCustomerData = {
           name: row.name.trim(),
-          mobileNo: row.mobileNo.toString().trim(),
+          mobileNo: mobileNo,
           email: row.email?.trim() || '',
           apartment: row.apartment.trim(),
           doorNo: row.doorNo.toString().trim(),
-          carModel: row.carModel.trim(),
-          carType: row.carType.toLowerCase(),
-          vehicleNo: row.vehicleNo.trim(),
-          packageId: selectedPackage._id,
-          packageName: selectedPackage.name,
-          subscriptionStart,
-          subscriptionEnd,
-          washingSchedule: {
-            scheduleType: row.scheduleType,
-            washingDays: washingDays,
-            washFrequencyPerMonth: washFrequencyPerMonth,
-            lastWashDate: null,
-            nextWashDate: null
-          }
+          vehicles: processedVehicles,
+          status: 'active'
         };
 
         // Save customer
-        const newCustomer = new Customer(customerData);
+        const newCustomer = new Customer(newCustomerData);
         await newCustomer.save();
 
-        results.successful++;
+        results.successfulCustomers++;
+        results.totalVehicles += processedVehicles.length;
 
       } catch (error) {
-        results.failed++;
+        results.failedRows++;
         results.errors.push({
           row: rowNumber,
-          vehicleNo: row.vehicleNo || 'N/A',
+          customerName: row.name || 'Unknown',
+          customerMobile: row.mobileNo || 'N/A',
           error: error.message
         });
       }
     }
 
     res.status(200).json({
-      message: "Bulk import completed",
+      message: "Horizontal multi-vehicle bulk import completed",
       results: results
     });
 
