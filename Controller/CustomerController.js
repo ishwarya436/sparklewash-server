@@ -6,6 +6,8 @@ const Washer = require("../models/Washer");
 const mongoose = require("mongoose");
 const XLSX = require('xlsx');
 
+const { EXTService, IntExtService } = require("../utils/SMSService");
+
 // Helper function to calculate wash counts for a customer
 const calculateWashCounts = async (customer, vehicleId = null) => {
   try {
@@ -754,9 +756,9 @@ exports.getCustomerWashHistory = async (req, res) => {
 // ✅ Complete a wash for a customer (supports both single and multi-vehicle)
 exports.completeWash = async (req, res) => {
   try {
-    const { customerId, washerId, washerName, vehicleId } = req.body;
+    const { customerId, washerId, washerName, vehicleId, washType } = req.body;
 
-    console.log('🔍 Complete wash request:', { customerId, washerId, washerName, vehicleId });
+    console.log('🔍 Complete wash request:', { customerId, washerId, washerName, vehicleId, washType });
 
     // Validate required fields
     if (!customerId || !washerId) {
@@ -834,17 +836,15 @@ exports.completeWash = async (req, res) => {
       return res.status(400).json({ message: "No pending washes for this month" });
     }
 
-    // Determine wash type based on package
-    let washType = "exterior"; // default
     const packageName = packageInfo?.name || packageInfo;
-    if (packageName) {
-      const pkgName = packageName.toLowerCase();
-      if (pkgName.includes("classic") || pkgName.includes("premium")) {
-        washType = "both";
-      } else if (pkgName.includes("moderate")) {
-        washType = "exterior";
-      }
-    }
+    // if (packageName) {
+    //   const pkgName = packageName.toLowerCase();
+    //   if (pkgName.includes("classic") || pkgName.includes("premium")) {
+    //     washType = "both";
+    //   } else if (pkgName.includes("moderate")) {
+    //     washType = "exterior";
+    //   }
+    // }
 
     // Create wash log entry with all required fields
     const washLog = new WashLog({
@@ -884,6 +884,13 @@ exports.completeWash = async (req, res) => {
     const updatedWashCounts = targetVehicle 
       ? await calculateWashCounts(customer, actualVehicleId)
       : await calculateWashCounts(customer);
+
+    if(washType === 'exterior'){
+      await EXTService(`91${customer.mobileNo}`);
+    }
+    else{
+      await IntExtService(`91${customer.mobileNo}`);
+    }
 
     res.status(200).json({
       message: "Wash completed successfully",
@@ -1593,8 +1600,6 @@ exports.deleteVehicle = async (req, res) => {
     res.status(500).json({ message: "Error deleting vehicle", error: error.message });
   }
 };
-
-
 
 // ✅ Allocate washer to specific vehicle
 exports.allocateWasherToVehicle = async (req, res) => {
