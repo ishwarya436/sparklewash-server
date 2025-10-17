@@ -23,6 +23,7 @@ const dashboardRoutes = require("./routes/dashboardRoutes");
 const customerRoutes = require("./routes/CustomerRoutes");
 const washerRoutes = require("./routes/WasherRoutes"); 
 const packageRoutes = require("./routes/PackageRoutes");
+const renewalService = require('./services/renewalService');
 
 
 // Routes
@@ -52,3 +53,16 @@ mongoose.connect(process.env.MONGO_URI, {
 // Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Schedule auto-renew job: run every 6 hours
+const SIX_HOURS = 1000 * 60 * 60 * 6;
+setInterval(async () => {
+  try {
+    const result = await renewalService.runAutoRenewOnce();
+    if (result && result.renewed) {
+      console.log(`Auto-renew executed. Packages renewed: ${result.renewed}`);
+    }
+  } catch (err) {
+    console.error('Auto-renew job error:', err);
+  }
+}, SIX_HOURS);

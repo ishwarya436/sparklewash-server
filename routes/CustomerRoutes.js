@@ -45,6 +45,13 @@ router.put("/allocate-washer", allocateWasher); // PUT /api/customer/allocate-wa
 router.post("/complete-wash", completeWash); // POST /api/customer/complete-wash
 router.delete("/deletecustomer/:id", deleteCustomer); // DELETE /api/customer/deletecustomer/:id
 router.get("/:id/wash-history", getCustomerWashHistory); // GET /api/customer/:id/wash-history
+// Admin/manual endpoints
+router.post('/admin/auto-renew', require('../Controller/CustomerController').triggerAutoRenew);
+// Package history for customer or specific vehicle
+router.get('/:customerId/package-history', require('../Controller/CustomerController').getPackageHistory);
+router.get('/:customerId/vehicles/:vehicleId/package-history', require('../Controller/CustomerController').getPackageHistory);
+// Admin backfill endpoint (run after manual DB edits)
+router.post('/admin/backfill-package-history', require('../Controller/CustomerController').backfillPackageHistory);
 
 // Multi-vehicle specific routes
 router.post("/:customerId/vehicles", addVehicleToCustomer); // POST /api/customer/:customerId/vehicles

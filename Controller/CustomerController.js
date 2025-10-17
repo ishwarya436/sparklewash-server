@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
 const XLSX = require('xlsx');
 
 const { EXTService, IntExtService } = require("../utils/SMSService");
+const renewalService = require('../services/renewalService');
 
 // Helper function to calculate wash counts for a customer
 const calculateWashCounts = async (customer, vehicleId = null) => {
@@ -141,11 +142,12 @@ exports.getAllCustomers = async (req, res) => {
                 vehicleNo: vehicle.vehicleNo,
                 carType: vehicle.carType,
                 packageId: vehicle.packageId,
-                packageName: vehicle.packageId ? vehicle.packageId.name : null,
+                // Preserve package start/end dates that live on the vehicle subdocument
+                packageStartDate: vehicle.packageStartDate,
+                packageEndDate: vehicle.packageEndDate,
+                packageName: vehicle.packageId ? (vehicle.packageId.name || vehicle.packageName) : vehicle.packageName || null,
                 washerId: vehicle.washerId,
                 washingSchedule: vehicle.washingSchedule,
-                subscriptionStart: vehicle.subscriptionStart,
-                subscriptionEnd: vehicle.subscriptionEnd,
                 status: vehicle.status,
                 // Individual vehicle wash counts
                 pendingWashes: vehicleWashCounts.pending,
@@ -195,8 +197,9 @@ exports.getAllCustomers = async (req, res) => {
             packageId: customer.packageId,
             packageName: customer.packageId ? customer.packageId.name : null,
             washerId: customer.washerId,
-            subscriptionStart: customer.subscriptionStart,
-            subscriptionEnd: customer.subscriptionEnd,
+
+            packageStartDate: customer.packageStartDate,
+            packageEndDate: customer.packageEndDate,
             status: customer.status,
             washingSchedule: customer.washingSchedule,
             totalVehicles: 1,
@@ -225,24 +228,45 @@ exports.getCustomerById = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid customer ID" });
     }
+    console.log(`getCustomerById called for id=${id}`);
 
-    const customer = await Customer.findById(id)
-      .populate("packageId")
-      .populate("washerId");
+    // 1) simple lean fetch first (safe)
+    let customer = await Customer.findById(id)
+      .select('-__v')
+      .lean();
+    console.log('getCustomerById - simple fetch returned?', !!customer);
 
-    if (!customer) {
-      return res.status(404).json({ message: "Customer not found" });
+    if (!customer) return res.status(404).json({ message: 'Customer not found' });
+
+    // 2) attempt to populate refs only if needed and wrapped in try/catch
+    try {
+      const populated = await Customer.findById(id)
+        .populate('packageId')
+        .populate('washerId')
+        .populate('vehicles.packageId')
+        .populate('vehicles.washerId')
+        .populate('vehicles.packageHistory.packageId')
+        .populate('packageHistory.packageId')
+        .lean();
+      console.log('getCustomerById - populated fetch succeeded');
+      if (populated) customer = populated;
+    } catch (popErr) {
+      console.error('getCustomerById - populate failed:', popErr && popErr.stack ? popErr.stack : popErr);
+      // proceed with lean customer data
     }
 
+    // compute wash counts (works with lean or populated customer)
     const washCounts = await calculateWashCounts(customer);
 
     const customerWithWashCounts = {
-      ...customer.toObject(),
-      packageName: customer.packageId ? customer.packageId.name : null, // Add package name
+      ...customer,
+      packageName: customer.packageId ? (customer.packageId.name || customer.packageName) : null,
+      packageStartDate: customer.packageStartDate,
+      packageEndDate: customer.packageEndDate,
       pendingWashes: washCounts.pending,
       completedWashes: washCounts.completed,
       totalMonthlyWashes: washCounts.total,
-      price: customer.packageId ? customer.packageId.pricePerMonth : 0
+      price: customer.packageId ? (customer.packageId.pricePerMonth || 0) : 0
     };
 
     res.status(200).json(customerWithWashCounts);
@@ -309,22 +333,19 @@ exports.addCustomer = async (req, res) => {
         vehicles.map(async (vehicle) => {
           const Package = require('../models/Package');
           const selectedPackage = await Package.findById(vehicle.packageId);
-          
           if (!selectedPackage) {
             throw new Error(`Package not found for vehicle ${vehicle.vehicleNo}`);
           }
-
-          // Calculate subscription dates
-          const subscriptionStart = new Date();
-          const subscriptionEnd = new Date();
-          subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
-
+          // Calculate subscription and package dates
+          const now = new Date();
+          const packageStartDate = now;
+          const packageEndDate = new Date(now);
+          packageEndDate.setMonth(packageEndDate.getMonth() + 1);
+         
           // Determine washing schedule
           let washingDays = [];
           let washFrequencyPerMonth = 8;
-          
           const selectedScheduleType = vehicle.scheduleType || 'schedule1';
-          
           if (selectedPackage.name === 'Basic') {
             washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
             washFrequencyPerMonth = 8;
@@ -332,7 +353,6 @@ exports.addCustomer = async (req, res) => {
             washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
             washFrequencyPerMonth = 12;
           }
-
           return {
             carModel: vehicle.carModel.trim(),
             vehicleNo: vehicle.vehicleNo.trim().toUpperCase(),
@@ -345,8 +365,9 @@ exports.addCustomer = async (req, res) => {
               washingDays: washingDays,
               washFrequencyPerMonth: washFrequencyPerMonth
             },
-            subscriptionStart,
-            subscriptionEnd,
+            
+            packageStartDate,
+            packageEndDate,
             status: 'active'
           };
         })
@@ -369,13 +390,25 @@ exports.addCustomer = async (req, res) => {
         packageName: undefined,
         washerId: undefined,
         washingSchedule: undefined,
-        subscriptionStart: undefined,
-        subscriptionEnd: undefined
+        
       });
 
       const savedCustomer = await newCustomer.save();
-      
-      // Populate vehicle package and washer details
+
+      // Record package history for each vehicle
+      for (const vehicle of savedCustomer.vehicles) {
+        if (!vehicle.packageHistory) vehicle.packageHistory = [];
+        vehicle.packageHistory.push({
+          packageId: vehicle.packageId,
+          packageName: vehicle.packageName,
+          startDate: vehicle.packageStartDate,
+          endDate: vehicle.packageEndDate,
+          autoRenewed: false
+        });
+      }
+      await savedCustomer.save();
+
+      // Populate vehicle package and washer details (ensure all fields are present)
       const populatedCustomer = await Customer.findById(savedCustomer._id)
         .populate('vehicles.packageId')
         .populate('vehicles.washerId');
@@ -418,9 +451,7 @@ exports.addCustomer = async (req, res) => {
       }
 
       // Calculate subscription dates and washing schedule
-      const subscriptionStart = new Date();
-      const subscriptionEnd = new Date();
-      subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+     
 
       let washingDays = [];
       let washFrequencyPerMonth = 8;
@@ -436,6 +467,10 @@ exports.addCustomer = async (req, res) => {
       }
 
       // Create single vehicle customer
+      const now = new Date();
+      const packageStartDate = now;
+      const packageEndDate = new Date(now);
+      packageEndDate.setMonth(packageEndDate.getMonth() + 1);
       const newCustomer = new Customer({
         name: name.trim(),
         mobileNo: mobileNo.trim(),
@@ -453,16 +488,35 @@ exports.addCustomer = async (req, res) => {
           washingDays: washingDays,
           washFrequencyPerMonth: washFrequencyPerMonth
         },
-        subscriptionStart,
-        subscriptionEnd,
+        
+        packageStartDate,
+        packageEndDate,
         status: 'active'
       });
 
       const savedCustomer = await newCustomer.save();
       
+      // Record package history (legacy single-vehicle fields)
+      if (!savedCustomer.packageHistory) savedCustomer.packageHistory = [];
+      savedCustomer.packageHistory.push({
+        packageId: savedCustomer.packageId,
+        packageName: savedCustomer.packageName,
+        startDate: savedCustomer.packageStartDate,
+        endDate: savedCustomer.packageEndDate,
+        autoRenewed: false
+      });
+      await savedCustomer.save();
+
       const populatedCustomer = await Customer.findById(savedCustomer._id)
         .populate('packageId')
         .populate('washerId');
+
+      // Add packageStartDate and packageEndDate to response
+      const responseCustomer = {
+        ...populatedCustomer.toObject(),
+        packageStartDate: savedCustomer.packageStartDate,
+        packageEndDate: savedCustomer.packageEndDate
+      };
 
       res.status(201).json({ 
         message: "Customer created successfully", 
@@ -519,6 +573,128 @@ exports.deleteCustomer = async (req, res) => {
   }
 };
 
+// Manual trigger to run auto-renew logic (can be called by cron or admin)
+exports.triggerAutoRenew = async (req, res) => {
+  try {
+    const result = await renewalService.runAutoRenewOnce();
+    res.status(200).json({ message: 'Auto-renew run completed', result });
+  } catch (error) {
+    console.error('Error running auto-renew:', error);
+    res.status(500).json({ message: 'Error running auto-renew', error: error.message });
+  }
+};
+
+// Get package history for a customer or specific vehicle
+exports.getPackageHistory = async (req, res) => {
+  try {
+    const { customerId, vehicleId } = req.params;
+    console.log(`getPackageHistory called - path=${req.path} customerId=${customerId} vehicleId=${vehicleId}`);
+    if (!customerId || !mongoose.Types.ObjectId.isValid(customerId)) {
+      return res.status(400).json({ message: 'Invalid or missing customerId' });
+    }
+
+    // If vehicleId provided, validate it too
+    if (vehicleId && !mongoose.Types.ObjectId.isValid(vehicleId)) {
+      return res.status(400).json({ message: 'Invalid vehicleId' });
+    }
+
+    // First, try a simple lean fetch without populate (cheaper and safer)
+    console.log('getPackageHistory - simple findById (no populate) for', customerId);
+    let customer = await Customer.findById(customerId).select('vehicles packageHistory name').lean();
+    console.log('getPackageHistory - simple fetch returned?', !!customer);
+
+    // If we found the customer and requested a vehicle, try to return any inline packageHistory right away
+    if (customer && vehicleId) {
+      const vehicle = Array.isArray(customer.vehicles) ? customer.vehicles.find(v => String(v._id) === String(vehicleId)) : null;
+      if (vehicle && vehicle.packageHistory && vehicle.packageHistory.length > 0) {
+        console.log('getPackageHistory - returning inline vehicle.packageHistory');
+        return res.status(200).json({ packageHistory: vehicle.packageHistory });
+      }
+    }
+
+    // If inline data not present, attempt a populated fetch as a second step
+    try {
+      console.log('getPackageHistory - attempting populated fetch for', customerId);
+      const populated = await Customer.findById(customerId)
+        .select('vehicles packageHistory name')
+        .populate('vehicles.packageHistory.packageId')
+        .populate('packageHistory.packageId')
+        .lean();
+      console.log('getPackageHistory - populated fetch returned?', !!populated);
+      customer = populated || customer;
+    } catch (populateErr) {
+      console.error('getPackageHistory - populate failed:', populateErr && populateErr.stack ? populateErr.stack : populateErr);
+      // proceed with whatever simple customer we have (could be null)
+    }
+
+    if (!customer) return res.status(404).json({ message: 'Customer not found' });
+
+    // If vehicleId requested, find the vehicle subdocument safely
+    if (vehicleId) {
+      const vehicle = Array.isArray(customer.vehicles) ? customer.vehicles.find(v => String(v._id) === String(vehicleId)) : null;
+      if (!vehicle) return res.status(404).json({ message: 'Vehicle not found' });
+      return res.status(200).json({ packageHistory: vehicle.packageHistory || [] });
+    }
+
+    // Return customer-level packageHistory (legacy single-vehicle)
+    return res.status(200).json({ packageHistory: customer.packageHistory || [] });
+  } catch (error) {
+    console.error('Error fetching package history:', error && error.stack ? error.stack : error);
+    res.status(500).json({ message: 'Error fetching package history', error: error && error.message ? error.message : String(error) });
+  }
+};
+
+// Admin endpoint: backfill packageHistory from existing packageStartDate/packageEndDate
+exports.backfillPackageHistory = async (req, res) => {
+  try {
+    const customers = await Customer.find();
+    let updatedCount = 0;
+
+    for (const c of customers) {
+      let changed = false;
+
+      // Legacy single-vehicle
+      if (!c.vehicles || c.vehicles.length === 0) {
+        if ((c.packageStartDate || c.packageEndDate) && (!c.packageHistory || c.packageHistory.length === 0)) {
+          c.packageHistory = c.packageHistory || [];
+          c.packageHistory.push({
+            packageId: c.packageId,
+            packageName: c.packageName,
+            startDate: c.packageStartDate,
+            endDate: c.packageEndDate,
+            autoRenewed: false
+          });
+          changed = true;
+        }
+      } else {
+        for (const v of c.vehicles) {
+          if ((v.packageStartDate || v.packageEndDate) && (!v.packageHistory || v.packageHistory.length === 0)) {
+            v.packageHistory = v.packageHistory || [];
+            v.packageHistory.push({
+              packageId: v.packageId,
+              packageName: v.packageName,
+              startDate: v.packageStartDate,
+              endDate: v.packageEndDate,
+              autoRenewed: false
+            });
+            changed = true;
+          }
+        }
+      }
+
+      if (changed) {
+        await c.save();
+        updatedCount++;
+      }
+    }
+
+    res.status(200).json({ message: 'Backfill completed', updatedCustomers: updatedCount });
+  } catch (error) {
+    console.error('Backfill error:', error);
+    res.status(500).json({ message: 'Backfill failed', error: error.message });
+  }
+};
+
 // ✅ Update customer
 exports.updateCustomer = async (req, res) => {
   try {
@@ -541,11 +717,22 @@ exports.updateCustomer = async (req, res) => {
       return res.status(400).json({ message: "Invalid customer ID" });
     }
 
-    // Validate required fields
-    if (!name || !mobileNo || !apartment || !doorNo || !carModel || !vehicleNo || !packageId) {
-      return res.status(400).json({ 
-        message: "All required fields must be provided" 
-      });
+    // Validate required fields (handle multi-vehicle customers differently)
+    // Fetch existing customer to know if this is a multi-vehicle customer
+    const existingCustomer = await Customer.findById(id);
+    if (!existingCustomer) return res.status(404).json({ message: 'Customer not found' });
+
+    const isMultiVehicleCustomer = existingCustomer.vehicles && existingCustomer.vehicles.length > 0;
+
+    if (!name || !mobileNo || !apartment || !doorNo) {
+      return res.status(400).json({ message: "Name, mobileNo, apartment and doorNo are required" });
+    }
+
+    // For single-vehicle customers, require carModel, vehicleNo and packageId
+    if (!isMultiVehicleCustomer) {
+      if (!carModel || !vehicleNo || !packageId) {
+        return res.status(400).json({ message: "All required fields must be provided" });
+      }
     }
 
     // Check if vehicle number already exists (exclude current customer)
@@ -561,11 +748,13 @@ exports.updateCustomer = async (req, res) => {
 
     // Get package details to determine carType and calculate washing schedule
     const Package = require('../models/Package');
-    const selectedPackage = await Package.findById(packageId);
-    if (!selectedPackage) {
-      return res.status(400).json({ 
-        message: "Selected package not found" 
-      });
+    let selectedPackage = null;
+    if (packageId) {
+      selectedPackage = await Package.findById(packageId);
+      if (!selectedPackage && !isMultiVehicleCustomer) {
+        // For single-vehicle customers packageId is required and must exist
+        return res.status(400).json({ message: "Selected package not found" });
+      }
     }
 
     // Calculate washing schedule if scheduleType is provided
@@ -598,14 +787,18 @@ exports.updateCustomer = async (req, res) => {
       email,
       apartment,
       doorNo,
-      carModel,
-      carType: selectedPackage.carType, // Update carType from selected package
-      vehicleNo,
-      packageId,
-      packageName, // Update package name directly
       updatedAt: new Date(),
       ...washingScheduleUpdate // Include washing schedule updates
     };
+
+    // Only set single-vehicle fields for customers that are single-vehicle
+    if (!isMultiVehicleCustomer) {
+      updateData.carModel = carModel;
+      updateData.carType = selectedPackage ? selectedPackage.carType : undefined;
+      updateData.vehicleNo = vehicleNo;
+      updateData.packageId = packageId;
+      updateData.packageName = packageName; // Update package name directly
+    }
 
     // Only add washerId if it's not empty
     if (washerId && washerId.trim() !== '') {
@@ -641,6 +834,25 @@ exports.updateCustomer = async (req, res) => {
       message: "Customer updated successfully",
       customer: customerWithWashCounts
     });
+    
+    // If package or package dates were provided in the request, append a packageHistory entry
+    try {
+      const shouldAppendHistory = packageId || req.body.packageStartDate || req.body.packageEndDate;
+      if (shouldAppendHistory) {
+        const cust = await Customer.findById(updatedCustomer._id);
+        if (!cust.packageHistory) cust.packageHistory = [];
+        cust.packageHistory.push({
+          packageId: cust.packageId,
+          packageName: cust.packageName,
+          startDate: cust.packageStartDate,
+          endDate: cust.packageEndDate,
+          autoRenewed: false
+        });
+        await cust.save();
+      }
+    } catch (err) {
+      console.error('Error appending package history after updateCustomer:', err.message);
+    }
   } catch (error) {
     res.status(500).json({ message: "Error updating customer", error: error.message });
   }
@@ -846,6 +1058,22 @@ exports.completeWash = async (req, res) => {
     //   }
     // }
 
+    // If frontend passed scheduledDate (marking for a filtered date), parse it and determine if this is early
+    let scheduledDate = null;
+    let early = false;
+    if (req.body && req.body.scheduledDate) {
+      try {
+        scheduledDate = new Date(req.body.scheduledDate);
+        // if scheduledDate is in the future compared to today, this is an early completion
+        const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+        const scheduledStart = new Date(scheduledDate); scheduledStart.setHours(0,0,0,0);
+        if (scheduledStart.getTime() > todayStart.getTime()) early = true;
+      } catch (err) {
+        scheduledDate = null;
+        early = false;
+      }
+    }
+
     // Create wash log entry with all required fields
     const washLog = new WashLog({
       customerId: actualCustomerId,
@@ -853,6 +1081,8 @@ exports.completeWash = async (req, res) => {
       washerId: washerId,
       packageId: packageInfo?._id || packageInfo?.packageId,
       washDate: new Date(),
+      scheduledDate: scheduledDate || null,
+      early: early,
       washType: washType,
       apartment: customer.apartment || 'Not specified',
       doorNo: customer.doorNo || 'Not specified',
@@ -1347,9 +1577,7 @@ exports.bulkImportCustomers = async (req, res) => {
           }
 
           // Calculate subscription dates
-          const subscriptionStart = new Date();
-          const subscriptionEnd = new Date();
-          subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+         
 
           // Determine washing schedule
           let washingDays = [];
@@ -1364,6 +1592,10 @@ exports.bulkImportCustomers = async (req, res) => {
           }
 
           // Create vehicle data
+          const now = new Date();
+          const packageStartDate = now;
+          const packageEndDate = new Date(now);
+          packageEndDate.setMonth(packageEndDate.getMonth() + 1);
           const vehicleData = {
             carModel: carModel,
             vehicleNo: normalizedVehicleNo,
@@ -1376,8 +1608,9 @@ exports.bulkImportCustomers = async (req, res) => {
               washingDays: washingDays,
               washFrequencyPerMonth: washFrequencyPerMonth
             },
-            subscriptionStart,
-            subscriptionEnd,
+           
+            packageStartDate,
+            packageEndDate,
             status: 'active'
           };
 
@@ -1402,7 +1635,21 @@ exports.bulkImportCustomers = async (req, res) => {
 
         // Save customer
         const newCustomer = new Customer(newCustomerData);
-        await newCustomer.save();
+        const saved = await newCustomer.save();
+        // Push packageHistory entries for each vehicle
+        let modified = false;
+        for (const v of saved.vehicles) {
+          if (!v.packageHistory) v.packageHistory = [];
+          v.packageHistory.push({
+            packageId: v.packageId,
+            packageName: v.packageName,
+            startDate: v.packageStartDate,
+            endDate: v.packageEndDate,
+            autoRenewed: false
+          });
+          modified = true;
+        }
+        if (modified) await saved.save();
 
         results.successfulCustomers++;
         results.totalVehicles += processedVehicles.length;
@@ -1473,9 +1720,12 @@ exports.addVehicleToCustomer = async (req, res) => {
     }
 
     // Create vehicle object
-    const subscriptionStart = new Date();
-    const subscriptionEnd = new Date();
-    subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
+  const now = new Date();
+  const packageStartDate = now;
+  const packageEndDate = new Date(now);
+  packageEndDate.setMonth(packageEndDate.getMonth() + 1);
+  // For backward compatibility
+ 
 
     let washingDays = [];
     let washFrequencyPerMonth = 8;
@@ -1502,8 +1752,9 @@ exports.addVehicleToCustomer = async (req, res) => {
         washingDays: washingDays,
         washFrequencyPerMonth: washFrequencyPerMonth
       },
-      subscriptionStart,
-      subscriptionEnd,
+    
+      packageStartDate,
+      packageEndDate,
       status: 'active'
     };
 
@@ -1515,6 +1766,18 @@ exports.addVehicleToCustomer = async (req, res) => {
     
     const updatedCustomer = await customer.save();
     
+    // Push package history for the newly added vehicle
+    const addedVehicle = updatedCustomer.vehicles[updatedCustomer.vehicles.length - 1];
+    if (!addedVehicle.packageHistory) addedVehicle.packageHistory = [];
+    addedVehicle.packageHistory.push({
+      packageId: addedVehicle.packageId,
+      packageName: addedVehicle.packageName,
+      startDate: addedVehicle.packageStartDate,
+      endDate: addedVehicle.packageEndDate,
+      autoRenewed: false
+    });
+    await updatedCustomer.save();
+
     const populatedCustomer = await Customer.findById(updatedCustomer._id)
       .populate('vehicles.packageId')
       .populate('vehicles.washerId');
@@ -1638,103 +1901,7 @@ exports.allocateWasherToVehicle = async (req, res) => {
 };
 
 // Add vehicle to existing customer
-exports.addVehicleToCustomer = async (req, res) => {
-  try {
-    const { customerId } = req.params;
-    const { vehicleNo, carModel, carType, packageId, scheduleType } = req.body;
-
-    // Validate required fields
-    if (!vehicleNo || !carModel || !packageId) {
-      return res.status(400).json({ 
-        message: "Vehicle number, car model, and package are required" 
-      });
-    }
-
-    // Check if customer exists
-    const customer = await Customer.findById(customerId);
-    if (!customer) {
-      return res.status(404).json({ message: "Customer not found" });
-    }
-
-    // Check if vehicle number already exists
-    const existingVehicle = await Customer.findOne({ 
-      $or: [
-        { vehicleNo: vehicleNo.trim() },
-        { "vehicles.vehicleNo": vehicleNo.trim() }
-      ]
-    });
-    
-    if (existingVehicle) {
-      return res.status(400).json({ 
-        message: `Vehicle number ${vehicleNo} already exists` 
-      });
-    }
-
-    // Get package details
-    const Package = require('../models/Package');
-    const selectedPackage = await Package.findById(packageId);
-    
-    if (!selectedPackage) {
-      return res.status(404).json({ message: "Package not found" });
-    }
-
-    // Calculate subscription dates
-    const subscriptionStart = new Date();
-    const subscriptionEnd = new Date();
-    subscriptionEnd.setMonth(subscriptionEnd.getMonth() + 1);
-
-    // Determine washing schedule
-    let washingDays = [];
-    let washFrequencyPerMonth = 8;
-    
-    const selectedScheduleType = scheduleType || 'schedule1';
-    
-    if (selectedPackage.name === 'Basic') {
-      washingDays = selectedScheduleType === 'schedule1' ? [1, 4] : [2, 6];
-      washFrequencyPerMonth = 8;
-    } else if (selectedPackage.name === 'Moderate' || selectedPackage.name === 'Classic') {
-      washingDays = selectedScheduleType === 'schedule1' ? [1, 3, 5] : [2, 4, 6];
-      washFrequencyPerMonth = 12;
-    }
-
-    // Create new vehicle object
-    const newVehicle = {
-      carModel: carModel.trim(),
-      vehicleNo: vehicleNo.trim().toUpperCase(),
-      carType: carType || 'sedan',
-      packageId: packageId,
-      packageName: selectedPackage.name,
-      washerId: null,
-      washingSchedule: {
-        scheduleType: selectedScheduleType,
-        washingDays: washingDays,
-        washFrequencyPerMonth: washFrequencyPerMonth
-      },
-      subscriptionStart,
-      subscriptionEnd,
-      status: 'active'
-    };
-
-    // Add vehicle to customer's vehicles array
-    customer.vehicles.push(newVehicle);
-    
-    const updatedCustomer = await customer.save();
-    
-    // Populate vehicle package details
-    const populatedCustomer = await Customer.findById(updatedCustomer._id)
-      .populate('vehicles.packageId')
-      .populate('vehicles.washerId');
-
-    res.status(201).json({ 
-      message: "Vehicle added successfully", 
-      customer: populatedCustomer 
-    });
-
-  } catch (error) {
-    console.error('Error adding vehicle:', error);
-    res.status(500).json({ message: "Error adding vehicle", error: error.message });
-  }
-};
+// Removed duplicate addVehicleToCustomer function
 
 // Update vehicle details
 exports.updateVehicle = async (req, res) => {
@@ -1806,12 +1973,33 @@ exports.updateVehicle = async (req, res) => {
     }
 
     // Update vehicle details
-    customer.vehicles[vehicleIndex].carModel = carModel.trim();
-    customer.vehicles[vehicleIndex].vehicleNo = vehicleNo.trim().toUpperCase();
-    customer.vehicles[vehicleIndex].carType = carType || customer.vehicles[vehicleIndex].carType;
-    customer.vehicles[vehicleIndex].packageId = packageId;
-    customer.vehicles[vehicleIndex].packageName = selectedPackage.name;
-    customer.vehicles[vehicleIndex].washingSchedule = {
+    const vehicle = customer.vehicles[vehicleIndex];
+    vehicle.carModel = carModel.trim();
+    vehicle.vehicleNo = vehicleNo.trim().toUpperCase();
+    vehicle.carType = carType || vehicle.carType;
+
+    // Handle package renewal logic
+    const isPackageChanged = vehicle.packageId?.toString() !== packageId;
+    if (isPackageChanged) {
+      // Set new package dates: start from previous end date (if exists), else now
+      const prevEnd = vehicle.packageEndDate || new Date();
+      vehicle.packageStartDate = prevEnd;
+      const newEnd = new Date(prevEnd);
+      newEnd.setMonth(newEnd.getMonth() + 1);
+      vehicle.packageEndDate = newEnd;
+      // Push history entry
+      if (!vehicle.packageHistory) vehicle.packageHistory = [];
+      vehicle.packageHistory.push({
+        packageId: packageId,
+        packageName: selectedPackage.name,
+        startDate: vehicle.packageStartDate,
+        endDate: vehicle.packageEndDate,
+        autoRenewed: false
+      });
+    }
+    vehicle.packageId = packageId;
+    vehicle.packageName = selectedPackage.name;
+    vehicle.washingSchedule = {
       scheduleType: selectedScheduleType,
       washingDays: washingDays,
       washFrequencyPerMonth: washFrequencyPerMonth
