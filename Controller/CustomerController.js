@@ -111,16 +111,28 @@ const calculateWashCounts = async (customer, vehicleId = null) => {
 
 
 
-// ✅ Get all customers with package & washer details + wash counts (Multi-vehicle support)
+// ✅ Get all customers with package & washer details + wash q  counts (Multi-vehicle support)
 exports.getAllCustomers = async (req, res) => {
   try {
-    const customers = await Customer.find()
-      .populate("packageId")   // Get package details for backward compatibility
-      .populate("washerId")    // Get washer details for backward compatibility
-      .populate("vehicles.packageId")  // Get package details for each vehicle
-      .populate("vehicles.washerId");  // Get washer details for each vehicle
+    // 🔹 Get pagination params
+    const page = parseInt(req.query.page) || 1;       // default page = 1
+    const limit = parseInt(req.query.limit) || 10;    // default 10 per page
+    const skip = (page - 1) * limit;
 
-    // Add wash counts for each customer
+    // 🔹 Get total customers count (for pagination info)
+    const totalCustomers = await Customer.countDocuments();
+
+    // 🔹 Fetch paginated customers
+    const customers = await Customer.find()
+      .populate("packageId")
+      .populate("washerId")
+      .populate("vehicles.packageId")
+      .populate("vehicles.washerId")
+      .skip(skip)
+      .limit(limit)
+      .sort({ createdAt: -1 }); // optional: newest first
+
+    // 🔹 Add wash counts for each customer
     const customersWithWashCounts = await Promise.all(
       customers.map(async (customer) => {
         let aggregateWashCounts = { completed: 0, pending: 0, total: 0 };
@@ -134,6 +146,8 @@ exports.getAllCustomers = async (req, res) => {
               aggregateWashCounts.completed += vehicleWashCounts.completed;
               aggregateWashCounts.pending += vehicleWashCounts.pending;
               aggregateWashCounts.total += vehicleWashCounts.total;
+
+              
               
               return {
                 _id: vehicle._id,
@@ -211,7 +225,15 @@ exports.getAllCustomers = async (req, res) => {
       })
     );
 
-    res.status(200).json(customersWithWashCounts);
+    // 🔹 Send paginated response
+    res.status(200).json({
+      currentPage: page,
+      totalPages: Math.ceil(totalCustomers / limit),
+      totalCustomers,
+      limit,
+      customers: customersWithWashCounts,
+    });
+
   } catch (error) {
     res.status(500).json({ message: "Error fetching customers", error: error.message });
   }
