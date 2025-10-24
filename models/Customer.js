@@ -8,6 +8,20 @@ const vehicleSchema = new mongoose.Schema({
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: "Package" },
   packageName: { type: String },
   washerId: { type: mongoose.Schema.Types.ObjectId, ref: "Washer" },
+  // Backward-compatibility package dates for single-vehicle customers
+  packageStartDate: { type: Date },
+  packageEndDate: { type: Date },
+  // History of packages applied to this vehicle
+  packageHistory: [
+    {
+      packageId: { type: mongoose.Schema.Types.ObjectId, ref: 'Package' },
+      packageName: { type: String },
+      startDate: { type: Date },
+      endDate: { type: Date },
+      autoRenewed: { type: Boolean, default: false },
+      renewedOn: { type: Date }
+    }
+  ],
   
   // Washing Schedule Configuration for this vehicle
   washingSchedule: {
@@ -25,8 +39,7 @@ const vehicleSchema = new mongoose.Schema({
     washFrequencyPerMonth: { type: Number, default: 8 }
   },
   
-  subscriptionStart: { type: Date, default: Date.now },
-  subscriptionEnd: { type: Date },
+ 
   status: { type: String, enum: ["active", "inactive"], default: "active" },
   
   // Wash statistics for this vehicle
@@ -68,8 +81,7 @@ const customerSchema = new mongoose.Schema({
     nextWashDate: { type: Date },
     washFrequencyPerMonth: { type: Number, default: 8 }
   },
-  subscriptionStart: { type: Date, default: Date.now },
-  subscriptionEnd: { type: Date },
+  
   status: { type: String, enum: ["active", "inactive"], default: "active" }
 }, {
   timestamps: true,
