@@ -1100,12 +1100,23 @@ exports.completeWash = async (req, res) => {
 
     await washLog.save();
 
-    // Update last wash date
+    // Update last wash information
+    const lastWashInfo = {
+      date: new Date(),
+      washerName: washerName,
+      washerId: washerId,
+      washType: washType
+    };
+
     if (targetVehicle) {
-      // Update specific vehicle's last wash date
+      // Update specific vehicle's last wash info
+      targetVehicle.lastWash = lastWashInfo;
+      if (!targetVehicle.washingSchedule) targetVehicle.washingSchedule = {};
       targetVehicle.washingSchedule.lastWashDate = new Date();
     } else {
-      // Update customer's last wash date (single vehicle)
+      // Update customer's last wash info (single vehicle)
+      customer.lastWash = lastWashInfo;
+      if (!customer.washingSchedule) customer.washingSchedule = {};
       customer.washingSchedule.lastWashDate = new Date();
     }
     await customer.save();
@@ -1127,7 +1138,12 @@ exports.completeWash = async (req, res) => {
       washId: washLog._id,
       pendingWashes: updatedWashCounts.pending,
       completedWashes: updatedWashCounts.completed,
-      totalMonthlyWashes: updatedWashCounts.total
+      totalMonthlyWashes: updatedWashCounts.total,
+      lastWash: {
+        date: targetVehicle ? targetVehicle.lastWash.date : customer.lastWash.date,
+        washerName: washerName,
+        washType: washType
+      }
     });
 
   } catch (error) {

@@ -32,6 +32,14 @@ const vehicleSchema = new mongoose.Schema({
   subscriptionEnd: { type: Date },
   isActive: { type: Boolean, default: true },
   
+  // Last wash information
+  lastWash: {
+    date: { type: Date },
+    washerName: { type: String },
+    washerId: { type: mongoose.Schema.Types.ObjectId, ref: "Washer" },
+    washType: { type: String, enum: ["exterior", "interior", "both"] }
+  },
+  
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
