@@ -321,6 +321,34 @@ exports.getWasherDashboard = async (req, res) => {
     const apartmentList = [...new Set(customerVehicleAssignments.map(assignment => assignment.apartment))].filter(Boolean);
     const carTypeList = [...new Set(customerVehicleAssignments.map(assignment => assignment.carType))].filter(Boolean);
 
+    // Mark assignments that were already washed today (IST) so client can disable buttons
+    try {
+      const now = new Date();
+      const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+      const istNow = new Date(now.getTime() + istOffsetMs);
+      const istYear = istNow.getUTCFullYear();
+      const istMonth = istNow.getUTCMonth();
+      const istDate = istNow.getUTCDate();
+      // compute IST end of day timestamp
+      const istEnd = new Date(Date.UTC(istYear, istMonth, istDate, 18, 29, 59, 999));
+
+      customerVehicleAssignments.forEach(assignment => {
+        try {
+          const lastWash = assignment.washingSchedule && assignment.washingSchedule.lastWashDate ? new Date(assignment.washingSchedule.lastWashDate) : null;
+          if (!lastWash) return;
+          const lastWashIst = new Date(lastWash.getTime() + istOffsetMs);
+          if (lastWashIst.getUTCFullYear() === istYear && lastWashIst.getUTCMonth() === istMonth && lastWashIst.getUTCDate() === istDate) {
+            assignment.washedToday = true;
+            assignment.disabledUntil = istEnd.getTime();
+          }
+        } catch (e) {
+          // ignore per-assignment errors
+        }
+      });
+    } catch (e) {
+      // ignore marking errors
+    }
+
     // Apply filters to the flattened assignments
     let filteredAssignments = customerVehicleAssignments;
 
@@ -363,7 +391,7 @@ exports.getWasherDashboard = async (req, res) => {
         console.log(`  📅 Checking day ${washingScheduleDay}: ${hasWashToday ? '✅ HAS WASH' : '❌ No wash'}`);
         return hasWashToday;
       });
-    } else if (date === 'today' || !date) {
+  } else if (date === 'today' || !date) {
       // Default: show only assignments that need wash today
       const today = new Date();
       const todayDayOfWeek = today.getDay();
@@ -398,12 +426,25 @@ exports.getWasherDashboard = async (req, res) => {
         if (lastWash) {
           const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
           const lastWashStart = new Date(lastWash.getFullYear(), lastWash.getMonth(), lastWash.getDate());
-          
+
           if (lastWashStart.getTime() === todayStart.getTime()) {
-            return false; // Already washed today
+            // Instead of excluding the assignment, keep it visible but mark as washedToday
+            // and provide a disabledUntil timestamp (IST end of day) so the client can disable buttons
+            try {
+              // compute IST end-of-day timestamp (ms)
+              const now = new Date();
+              const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+              const istNow = new Date(now.getTime() + istOffsetMs);
+              const istEnd = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 18, 29, 59, 999));
+              assignment.washedToday = true;
+              assignment.disabledUntil = istEnd.getTime();
+            } catch (e) {
+              assignment.washedToday = true;
+            }
+            return true; // keep it in the list
           }
         }
-        
+
         return true;
       });
     }
@@ -446,7 +487,9 @@ exports.getWasherDashboard = async (req, res) => {
           ...assignment,
           pendingWashes,
           completedWashes,
-          totalMonthlyWashes
+          totalMonthlyWashes,
+          washedToday: assignment.washedToday || false,
+          disabledUntil: assignment.disabledUntil || null
         };
       })
     );
@@ -477,41 +520,106 @@ exports.getWasherDashboard = async (req, res) => {
 // ✅ Complete a wash
 exports.completeWash = async (req, res) => {
   try {
-    const { customerId, washerId, washType, location } = req.body;
+    // Support two formats: assignment row id (customerId or customerId-vehicleId) or explicit fields
+    const { customerId, washerId, washType, location, vehicleId } = req.body;
 
     if (!customerId || !washerId) {
       return res.status(400).json({ message: "Customer ID and Washer ID are required" });
     }
 
+    // Handle combined id format: "customerId-vehicleId"
+    let actualCustomerId = customerId;
+    let actualVehicleId = vehicleId || null;
+    if (typeof customerId === 'string' && customerId.includes('-') && !vehicleId) {
+      const parts = customerId.split('-');
+      if (parts.length === 2) {
+        actualCustomerId = parts[0];
+        actualVehicleId = parts[1];
+      }
+    }
+
+    // Validate IDs
+    if (!mongoose.Types.ObjectId.isValid(actualCustomerId) || !mongoose.Types.ObjectId.isValid(washerId)) {
+      return res.status(400).json({ message: "Invalid Customer ID or Washer ID" });
+    }
+    if (actualVehicleId && !mongoose.Types.ObjectId.isValid(actualVehicleId)) {
+      return res.status(400).json({ message: "Invalid Vehicle ID" });
+    }
+
     // Verify customer and washer exist
-    const customer = await Customer.findById(customerId);
+    const customer = await Customer.findById(actualCustomerId).populate('vehicles.packageId');
     const washer = await Washer.findById(washerId);
 
     if (!customer || !washer) {
       return res.status(404).json({ message: "Customer or Washer not found" });
     }
 
-    // Create wash log entry
+    // If actualVehicleId provided, validate it exists on the customer
+    let targetVehicle = null;
+    if (actualVehicleId) {
+      targetVehicle = Array.isArray(customer.vehicles) ? customer.vehicles.find(v => String(v._id) === String(actualVehicleId)) : null;
+      if (!targetVehicle) {
+        return res.status(404).json({ message: "Vehicle not found for this customer" });
+      }
+    } else if (Array.isArray(customer.vehicles) && customer.vehicles.length === 1) {
+      // infer vehicle for single-vehicle customers
+      targetVehicle = customer.vehicles[0];
+      actualVehicleId = targetVehicle._id;
+    }
+
+    // Create wash log entry with optional vehicleId
     const washLog = new WashLog({
-      customerId,
+      customerId: actualCustomerId,
+      vehicleId: actualVehicleId || null,
       washerId,
       washDate: new Date(),
       washType: washType || 'exterior',
       status: 'completed',
-      location: customer.apartment,
+      location: location || customer.apartment,
       notes: `Completed by ${washer.name}`
     });
 
     await washLog.save();
 
+    // Update customer's washingSchedule lastWashDate for the specific vehicle or customer
+    try {
+      if (actualVehicleId) {
+        // set vehicle's washingSchedule.lastWashDate
+        const vehicleIndex = customer.vehicles.findIndex(v => String(v._id) === String(actualVehicleId));
+        if (vehicleIndex !== -1) {
+          customer.vehicles[vehicleIndex].washingSchedule = customer.vehicles[vehicleIndex].washingSchedule || {};
+          customer.vehicles[vehicleIndex].washingSchedule.lastWashDate = new Date();
+        }
+      } else {
+        customer.washingSchedule = customer.washingSchedule || {};
+        customer.washingSchedule.lastWashDate = new Date();
+      }
+      await customer.save();
+    } catch (e) {
+      console.error('Failed to update customer lastWashDate', e && e.message);
+    }
+
+    // Compute disabledUntil (IST end of day) for client to disable buttons
+    let disabledUntil = null;
+    try {
+      const now = new Date();
+      const istOffsetMs = (5 * 60 + 30) * 60 * 1000;
+      const istNow = new Date(now.getTime() + istOffsetMs);
+      const istEnd = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate(), 18, 29, 59, 999));
+      disabledUntil = istEnd.getTime();
+    } catch (e) {
+      disabledUntil = Date.now();
+    }
+
     // Update washer's completed washes count
-    washer.totalWashesCompleted += 1;
+    washer.totalWashesCompleted = (washer.totalWashesCompleted || 0) + 1;
     washer.lastActive = new Date();
     await washer.save();
 
     res.status(200).json({
       message: "Wash completed successfully",
-      washLog
+      washLog,
+      disabledUntil
     });
   } catch (error) {
     res.status(500).json({ message: "Error completing wash", error: error.message });

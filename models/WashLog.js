@@ -8,8 +8,8 @@ const washLogSchema = new mongoose.Schema({
   },
   vehicleId: { 
     type: mongoose.Schema.Types.ObjectId, 
-    ref: "Customer", // Reference Customer since vehicle info is stored there
-    required: false // Make optional for now
+    ref: "Vehicle", // Reference specific Vehicle subdocument (stored on Customer)
+    required: false // optional: legacy logs may not have vehicle-specific id
   },
   washerId: { 
     type: mongoose.Schema.Types.ObjectId, 

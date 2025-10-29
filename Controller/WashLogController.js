@@ -53,6 +53,7 @@ const completeWash = async (req, res) => {
   try {
     const {
       customerId,
+      vehicleId,
       washerId,
       washType, // "exterior", "interior", "both"
       location,
@@ -66,18 +67,32 @@ const completeWash = async (req, res) => {
       });
     }
 
-    // Get customer details to populate packageId and vehicleId
-    const customer = await Customer.findById(customerId).populate('packageId');
+    // Get customer details to populate packageId and (optionally) infer vehicleId
+    const customer = await Customer.findById(customerId).populate('packageId').populate('vehicles');
     if (!customer) {
       return res.status(404).json({ message: "Customer not found" });
     }
 
+    // Determine vehicleId to record on the wash log
+    // Priority: explicit vehicleId from client -> if single vehicle on customer use that -> else null
+    let resolvedVehicleId = null;
+    if (vehicleId) {
+      resolvedVehicleId = vehicleId;
+    } else if (Array.isArray(customer.vehicles) && customer.vehicles.length === 1) {
+      resolvedVehicleId = customer.vehicles[0]._id;
+    }
+
+    // Prefer vehicle package if available, otherwise customer's package
+    const packageIdToUse = (resolvedVehicleId && customer.vehicles && customer.vehicles.length > 0)
+      ? (customer.vehicles.find(v => String(v._id) === String(resolvedVehicleId))?.packageId || customer.packageId?._id)
+      : (customer.packageId?._id);
+
     // Create wash log entry
     const washLog = new WashLog({
       customerId,
-      vehicleId: customerId, // Using customerId as vehicleId for now (you can create separate vehicle model)
+      vehicleId: resolvedVehicleId,
       washerId,
-      packageId: customer.packageId._id,
+      packageId: packageIdToUse,
       washType,
       washDate: new Date(),
       location: location || customer.apartment,
