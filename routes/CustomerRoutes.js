@@ -16,7 +16,8 @@ const {
   addVehicleToCustomer,
   updateVehicle,
   deleteVehicle,
-  allocateWasherToVehicle
+  allocateWasherToVehicle,
+  startVehiclePackage
 } = require("../Controller/CustomerController");
 
 // Configure multer for file uploads
@@ -45,6 +46,7 @@ router.put("/allocate-washer", allocateWasher); // PUT /api/customer/allocate-wa
 router.post("/complete-wash", completeWash); // POST /api/customer/complete-wash
 router.delete("/deletecustomer/:id", deleteCustomer); // DELETE /api/customer/deletecustomer/:id
 router.get("/:id/wash-history", getCustomerWashHistory); // GET /api/customer/:id/wash-history
+router.post("/:customerId/vehicles/:vehicleId/start-package", startVehiclePackage); // Start vehicle package
 // Admin/manual endpoints
 router.post('/admin/auto-renew', require('../Controller/CustomerController').triggerAutoRenew);
 // Package history for customer or specific vehicle

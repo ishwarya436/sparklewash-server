@@ -9,6 +9,64 @@ const XLSX = require('xlsx');
 const { EXTService, IntExtService } = require("../utils/SMSService");
 const renewalService = require('../services/renewalService');
 
+// Start package for a vehicle
+exports.startVehiclePackage = async (req, res) => {
+    try {
+        const { customerId, vehicleId } = req.params;
+
+        // Validate IDs
+        if (!mongoose.Types.ObjectId.isValid(customerId) || !mongoose.Types.ObjectId.isValid(vehicleId)) {
+            return res.status(400).json({ message: "Invalid customer or vehicle ID" });
+        }
+
+        const customer = await Customer.findById(customerId);
+        if (!customer) {
+            return res.status(404).json({ message: "Customer not found" });
+        }
+
+        // Find the vehicle
+        const vehicle = customer.vehicles.id(vehicleId);
+        if (!vehicle) {
+            return res.status(404).json({ message: "Vehicle not found" });
+        }
+
+        // Check if package is already started
+        if (vehicle.hasStarted) {
+            return res.status(400).json({ message: "Package is already started for this vehicle" });
+        }
+
+        // Set start date to now and end date to 29 days later
+        const now = new Date();
+        vehicle.packageStartDate = now;
+        vehicle.packageEndDate = new Date(now);
+        vehicle.packageEndDate.setDate(vehicle.packageEndDate.getDate() + 29); // Always 29 days
+        vehicle.hasStarted = true;
+
+        // Add to package history
+        if (!vehicle.packageHistory) vehicle.packageHistory = [];
+        vehicle.packageHistory.push({
+            packageId: vehicle.packageId,
+            packageName: vehicle.packageName,
+            startDate: vehicle.packageStartDate,
+            endDate: vehicle.packageEndDate,
+            autoRenewed: false
+        });
+
+        await customer.save();
+
+        res.status(200).json({
+            message: "Package started successfully",
+            startDate: vehicle.packageStartDate,
+            endDate: vehicle.packageEndDate,
+            vehicle: vehicle
+        });
+
+    } catch (error) {
+        console.error("Error starting package:", error);
+        res.status(500).json({ message: "Error starting package", error: error.message });
+    }
+};
+
 // Helper function to calculate wash counts for a customer
 const calculateWashCounts = async (customer, vehicleId = null) => {
   try {
@@ -336,11 +394,9 @@ exports.addCustomer = async (req, res) => {
           if (!selectedPackage) {
             throw new Error(`Package not found for vehicle ${vehicle.vehicleNo}`);
           }
-          // Calculate subscription and package dates
-          const now = new Date();
-          const packageStartDate = now;
-          const packageEndDate = new Date(now);
-          packageEndDate.setMonth(packageEndDate.getMonth() + 1);
+          // Initialize dates as null - will be set when package is started
+          const packageStartDate = null;
+          const packageEndDate = null;
          
           // Determine washing schedule
           let washingDays = [];
@@ -1607,11 +1663,7 @@ exports.bulkImportCustomers = async (req, res) => {
             washFrequencyPerMonth = 12;
           }
 
-          // Create vehicle data
-          const now = new Date();
-          const packageStartDate = now;
-          const packageEndDate = new Date(now);
-          packageEndDate.setMonth(packageEndDate.getMonth() + 1);
+          // Create vehicle data - without automatically starting the package
           const vehicleData = {
             carModel: carModel,
             vehicleNo: normalizedVehicleNo,
@@ -1624,9 +1676,7 @@ exports.bulkImportCustomers = async (req, res) => {
               washingDays: washingDays,
               washFrequencyPerMonth: washFrequencyPerMonth
             },
-           
-            packageStartDate,
-            packageEndDate,
+            hasStarted: false,  // Package needs to be started manually
             status: 'active'
           };
 
@@ -1659,8 +1709,7 @@ exports.bulkImportCustomers = async (req, res) => {
           v.packageHistory.push({
             packageId: v.packageId,
             packageName: v.packageName,
-            startDate: v.packageStartDate,
-            endDate: v.packageEndDate,
+       
             autoRenewed: false
           });
           modified = true;
@@ -1735,12 +1784,19 @@ exports.addVehicleToCustomer = async (req, res) => {
       });
     }
 
-    // Create vehicle object
-  const now = new Date();
-  const packageStartDate = now;
-  const packageEndDate = new Date(now);
-  packageEndDate.setMonth(packageEndDate.getMonth() + 1);
-  // For backward compatibility
+    // Create vehicle object with hasStarted set to false by default
+    // Package dates will be set when the package is started via the start-package endpoint
+    const vehicleData = {
+      carModel: carModel.trim(),
+      vehicleNo: vehicleNo.trim(),
+      packageId: selectedPackage._id,
+      packageName: selectedPackage.name,
+      carType: selectedPackage.carType,
+      hasStarted: false,  // Explicitly set to false
+      washingSchedule: {
+        scheduleType: scheduleType || 'schedule1'
+      }
+    };
  
 
     let washingDays = [];
@@ -1768,9 +1824,7 @@ exports.addVehicleToCustomer = async (req, res) => {
         washingDays: washingDays,
         washFrequencyPerMonth: washFrequencyPerMonth
       },
-    
-      packageStartDate,
-      packageEndDate,
+      hasStarted: false,  // Explicitly set to false - package needs to be started manually
       status: 'active'
     };
 

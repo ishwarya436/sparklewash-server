@@ -18,7 +18,7 @@ async function runAutoRenewOnce() {
         const prevEnd = vehicle.packageEndDate || now;
         const newStart = prevEnd;
         const newEnd = new Date(prevEnd);
-        newEnd.setMonth(newEnd.getMonth() + 1);
+        newEnd.setDate(newEnd.getDate() + 29); // Always use 29 days
 
         // Perform an atomic update on the specific vehicle subdocument to ensure persistence
         const updateResult = await Customer.updateOne(
@@ -83,7 +83,7 @@ async function renewVehiclePackage(customerId, vehicleId) {
   const prevEnd = vehicle.packageEndDate || now;
   const newStart = prevEnd;
   const newEnd = new Date(prevEnd);
-  newEnd.setMonth(newEnd.getMonth() + 1);
+  newEnd.setDate(newEnd.getDate() + 29); // Always use 29 days
 
   vehicle.packageStartDate = newStart;
   vehicle.packageEndDate = newEnd;

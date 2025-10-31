@@ -31,6 +31,9 @@ const vehicleSchema = new mongoose.Schema({
   subscriptionStart: { type: Date },
   subscriptionEnd: { type: Date },
   isActive: { type: Boolean, default: true },
+  hasStarted: { type: Boolean, default: false },
+  packageStartDate: { type: Date },
+  packageEndDate: { type: Date },
   
   // Last wash information
   lastWash: {
