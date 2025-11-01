@@ -2,140 +2,171 @@ const mongoose = require("mongoose");
 const Package = require("../models/Package");
 require("dotenv").config();
 
-// Your SparkleWash Package Pricing Structure
+// Packages compatible with models/Package.js
 const packages = [
-  // BASIC PACKAGE
+  // Basic
   {
     name: "Basic",
     carType: "sedan",
     pricePerMonth: 900,
-    exteriorWashes: 8,
-    interiorWashes: 2,
-    washesPerWeek: 2,
+    washCountPerWeek: 2,
+    washCountPerMonth: 8,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
     washDays: ["Monday", "Thursday"],
-    description: "8 Exterior washes + 2 Interior washes per month for Sedan cars"
+    description: "8 Exterior washes + 2 Interior washes per month for Sedan cars",
+    isActive: true,
   },
   {
     name: "Basic",
     carType: "suv",
     pricePerMonth: 1000,
-    exteriorWashes: 8,
-    interiorWashes: 2,
-    washesPerWeek: 2,
+    washCountPerWeek: 2,
+    washCountPerMonth: 8,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
     washDays: ["Monday", "Thursday"],
-    description: "8 Exterior washes + 2 Interior washes per month for SUV cars"
+    description: "8 Exterior washes + 2 Interior washes per month for SUV cars",
+    isActive: true,
   },
   {
     name: "Basic",
     carType: "premium",
     pricePerMonth: 1200,
-    exteriorWashes: 8,
-    interiorWashes: 2,
-    washesPerWeek: 2,
+    washCountPerWeek: 2,
+    washCountPerMonth: 8,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
     washDays: ["Monday", "Thursday"],
-    description: "8 Exterior washes + 2 Interior washes per month for Premium cars"
+    description: "8 Exterior washes + 2 Interior washes per month for Premium cars",
+    isActive: true,
   },
-  
-  // MODERATE PACKAGE
+
+  // Moderate
   {
     name: "Moderate",
     carType: "sedan",
     pricePerMonth: 1000,
-    exteriorWashes: 12,
-    interiorWashes: 2,
-    washesPerWeek: 3,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes + 2 Interior washes per month for Sedan cars"
+    description: "12 Exterior washes + 2 Interior washes per month for Sedan cars",
+    isActive: true,
   },
   {
     name: "Moderate",
     carType: "suv",
     pricePerMonth: 1200,
-    exteriorWashes: 12,
-    interiorWashes: 2,
-    washesPerWeek: 3,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes + 2 Interior washes per month for SUV cars"
+    description: "12 Exterior washes + 2 Interior washes per month for SUV cars",
+    isActive: true,
   },
   {
     name: "Moderate",
     carType: "premium",
     pricePerMonth: 1500,
-    exteriorWashes: 12,
-    interiorWashes: 2,
-    washesPerWeek: 3,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes + 2 Interior washes per month for Premium cars"
+    description: "12 Exterior washes + 2 Interior washes per month for Premium cars",
+    isActive: true,
   },
-  
-  // CLASSIC PACKAGE
+
+  // Classic
   {
     name: "Classic",
     carType: "sedan",
     pricePerMonth: 900,
-    exteriorWashes: 12,
-    interiorWashes: 0, // Only exterior washes
-    washesPerWeek: 3,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "0 per month",
+    exteriorWaxing: "Yes",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes per month for Sedan cars (Premium exterior only)"
+    description: "12 Exterior washes per month for Sedan cars (Premium exterior only)",
+    isActive: true,
   },
   {
     name: "Classic",
     carType: "suv",
     pricePerMonth: 1100,
-    exteriorWashes: 12,
-    interiorWashes: 0,
-    washesPerWeek: 3,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "0 per month",
+    exteriorWaxing: "Yes",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes per month for SUV cars (Premium exterior only)"
+    description: "12 Exterior washes per month for SUV cars (Premium exterior only)",
+    isActive: true,
   },
   {
     name: "Classic",
     carType: "premium",
     pricePerMonth: 1300,
-    exteriorWashes: 12,
-    interiorWashes: 0,
-    washesPerWeek: 3,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "0 per month",
+    exteriorWaxing: "Yes",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes per month for Premium cars (Premium exterior only)"
+    description: "12 Exterior washes per month for Premium cars (Premium exterior only)",
+    isActive: true,
   }
 ];
 
 async function seedPackages() {
   try {
-    // Connect to MongoDB
-    await mongoose.connect(process.env.MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    
-    console.log("MongoDB Connected for seeding...");
-    
+    // If mongoose is not already connected, establish a temporary connection
+    let createdConnection = false;
+    if (mongoose.connection.readyState === 0) {
+      await mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+      console.log("MongoDB Connected for seeding (temporary connection)...");
+      createdConnection = true;
+    } else {
+      console.log("Using existing mongoose connection for seeding...");
+    }
+
     // Clear existing packages
     await Package.deleteMany({});
     console.log("Existing packages cleared");
-    
+
     // Insert new packages
     const createdPackages = await Package.insertMany(packages);
     console.log(`✅ ${createdPackages.length} packages created successfully!`);
-    
-    // Display created packages
+
     createdPackages.forEach(pkg => {
       console.log(`📦 ${pkg.name} - ${pkg.carType.toUpperCase()} - ₹${pkg.pricePerMonth}/month`);
     });
-    
-    console.log("\n🎉 SparkleWash packages seeded successfully!");
-    process.exit(0);
-    
+
+    // If we created a temporary connection, close it. Otherwise leave connection open.
+    if (createdConnection) {
+      await mongoose.disconnect();
+      console.log("Temporary mongoose connection closed after seeding.");
+    }
+    // return success (do not exit process here)
+    return createdPackages;
   } catch (error) {
     console.error("Error seeding packages:", error);
-    process.exit(1);
+    throw error;
   }
 }
 
-// Run the seeder
+// Run the seeder if called directly
 if (require.main === module) {
-  seedPackages();
+  seedPackages()
+    .then(() => {
+      console.log('Seeding completed (direct execution).');
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('Seeding failed (direct execution):', err);
+      process.exit(1);
+    });
 }
 
-module.exports = { seedPackages, packages };
+module.exports = { seedPackages, packages };  
