@@ -167,6 +167,62 @@ const getWashHistory = async (req, res) => {
   }
 };
 
+// ✅ Get wash history for a washer
+const getWasherHistory = async (req, res) => {
+  try {
+    const { washerId } = req.params;
+    const { month, year } = req.query;
+
+    if (!washerId) return res.status(400).json({ message: 'Washer ID required' });
+
+    let dateFilter = {};
+    if (month && year) {
+      const startDate = new Date(year, month - 1, 1);
+      const endDate = new Date(year, month, 0);
+      dateFilter = {
+        washDate: {
+          $gte: startDate,
+          $lte: endDate
+        }
+      };
+    }
+
+    const washHistory = await WashLog.find({
+      washerId,
+      ...dateFilter
+    })
+      .populate('customerId', 'name mobileNo vehicles')
+      .populate('packageId', 'name')
+      .sort({ washDate: -1 });
+
+    // Map vehicleNo if available from customer vehicles
+    const mapped = washHistory.map(w => {
+      const obj = (w.toObject && typeof w.toObject === 'function') ? w.toObject() : w;
+      obj.vehicleNo = null;
+      try {
+        if (obj.vehicleId && obj.customerId && obj.customerId.vehicles && Array.isArray(obj.customerId.vehicles)) {
+          const veh = obj.customerId.vehicles.find(v => String(v._id) === String(obj.vehicleId));
+          if (veh) obj.vehicleNo = veh.vehicleNo || null;
+        }
+      } catch (e) {
+        // ignore
+      }
+      return obj;
+    });
+
+    const completedCount = mapped.filter(m => m.status === 'completed').length;
+    const cancelledCount = mapped.filter(m => m.status === 'cancelled').length;
+
+    res.status(200).json({
+      washHistory: mapped,
+      counts: { completed: completedCount, cancelled: cancelledCount, total: mapped.length }
+    });
+
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching washer history', error: error.message });
+  }
+};
+
 // ✅ Get all wash logs (for admin)
 const getAllWashLogs = async (req, res) => {
   try {
@@ -204,5 +260,105 @@ const getAllWashLogs = async (req, res) => {
 module.exports = {
   completeWash,
   getWashHistory,
-  getAllWashLogs
+  getWasherHistory,
+  getAllWashLogs,
+  cancelWash
 };
+
+// ✅ Cancel a completed wash (admin)
+async function cancelWash(req, res) {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ message: 'Wash ID required' });
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid wash ID' });
+
+    const washLog = await WashLog.findById(id);
+    if (!washLog) return res.status(404).json({ message: 'Wash log not found' });
+    if (washLog.status !== 'completed') return res.status(400).json({ message: 'Only completed washes can be cancelled' });
+
+    // No time-window restriction: allow cancellation at any time per product requirement
+
+    // Mark wash log as cancelled
+    washLog.status = 'cancelled';
+    washLog.cancelledAt = new Date();
+    washLog.cancelledBy = req.user?.id || 'admin';
+    await washLog.save();
+
+    // Update customer lastWash (for vehicle or customer)
+    try {
+      const customerId = washLog.customerId;
+      const vehicleId = washLog.vehicleId || null;
+      const Customer = require('../models/Customer');
+      const Washer = require('../models/Washer');
+
+      const customer = await Customer.findById(customerId);
+      if (customer) {
+        if (vehicleId && Array.isArray(customer.vehicles)) {
+          const vid = String(vehicleId);
+          const vIndex = customer.vehicles.findIndex(v => String(v._id) === vid);
+          if (vIndex !== -1) {
+            // find previous completed wash for this vehicle
+            const prev = await WashLog.findOne({
+              customerId: customerId,
+              vehicleId: vehicleId,
+              status: 'completed',
+              _id: { $ne: washLog._id }
+            }).sort({ completedAt: -1, washDate: -1 });
+            if (prev && prev.completedAt) {
+              customer.vehicles[vIndex].washingSchedule = customer.vehicles[vIndex].washingSchedule || {};
+              customer.vehicles[vIndex].washingSchedule.lastWashDate = prev.completedAt;
+            } else {
+              // no previous wash, clear lastWashDate
+              if (customer.vehicles[vIndex].washingSchedule) customer.vehicles[vIndex].washingSchedule.lastWashDate = null;
+            }
+          }
+        } else {
+          // legacy single-customer last wash
+          const prev = await WashLog.findOne({ customerId: customerId, status: 'completed', _id: { $ne: washLog._id } }).sort({ completedAt: -1, washDate: -1 });
+          if (prev && prev.completedAt) {
+            customer.washingSchedule = customer.washingSchedule || {};
+            customer.washingSchedule.lastWashDate = prev.completedAt;
+          } else {
+            if (customer.washingSchedule) customer.washingSchedule.lastWashDate = null;
+          }
+        }
+        await customer.save();
+      }
+
+      // Adjust washer totals
+      if (washLog.washerId) {
+        const washer = await Washer.findById(washLog.washerId);
+        if (washer) {
+          washer.totalWashesCompleted = Math.max(0, (washer.totalWashesCompleted || 0) - 1);
+          await washer.save();
+        }
+      }
+
+      // Recompute updated counts to return for UI
+      const updatedWashCounts = await calculateWashCounts(customer);
+      let vehicleCompleted = 0;
+      if (vehicleId) {
+        vehicleCompleted = await WashLog.countDocuments({ customerId: customerId, vehicleId: vehicleId, status: 'completed' });
+      }
+
+      return res.status(200).json({
+        message: 'Wash cancelled',
+        washId: washLog._id,
+        customerId: washLog.customerId,
+        vehicleId: washLog.vehicleId || null,
+        updatedCounts: {
+          pending: updatedWashCounts.pending,
+          completed: updatedWashCounts.completed,
+          total: updatedWashCounts.total,
+          vehicleCompleted
+        }
+      });
+    } catch (innerErr) {
+      console.error('Error updating customer/washer after cancellation:', innerErr);
+      return res.status(200).json({ message: 'Wash cancelled, but failed to update derived counts' , washId: washLog._id });
+    }
+  } catch (error) {
+    console.error('Error cancelling wash:', error);
+    return res.status(500).json({ message: 'Error cancelling wash', error: error.message });
+  }
+}

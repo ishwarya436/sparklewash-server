@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const vehicleSchema = new mongoose.Schema({
   carModel: { type: String, required: true },
   vehicleNo: { type: String, required: true },
-  carType: { type: String, enum: ["sedan", "suv", "premium"], required: true },
+  carType: { type: String, enum: ["sedan", "suv", "premium", "hatch"], required: true },
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: "Package" },
   packageName: { type: String },
   washerId: { type: mongoose.Schema.Types.ObjectId, ref: "Washer" },
@@ -62,7 +62,7 @@ const customerSchema = new mongoose.Schema({
   
   // Backward compatibility fields (for single vehicle customers)
   carModel: { type: String },
-  carType: { type: String, enum: ["sedan", "suv", "premium"] },
+  carType: { type: String, enum: ["sedan", "suv", "premium", "hatch"] },
   vehicleNo: { type: String },
   packageId: { type: mongoose.Schema.Types.ObjectId, ref: "Package" },
   packageName: { type: String },

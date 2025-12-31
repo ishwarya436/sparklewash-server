@@ -33,6 +33,7 @@ const upload = multer({
       cb(new Error('Only Excel files are allowed'), false);
     }
   },
+  
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit
   }
@@ -44,6 +45,10 @@ router.post("/add", addCustomer); // POST /api/customer/add (supports multiple v
 router.put("/update/:id", updateCustomer); // PUT /api/customer/update/:id
 router.put("/allocate-washer", allocateWasher); // PUT /api/customer/allocate-washer (legacy)
 router.post("/complete-wash", completeWash); // POST /api/customer/complete-wash
+// Admin: Get pending washes for a customer (grouped by vehicle)
+router.get("/:customerId/pending-washes", require('../Controller/CustomerController').getPendingWashesForCustomer);
+// Admin: Complete a scheduled/pending wash (no SMS)
+router.post("/:customerId/complete-pending", require('../Controller/CustomerController').completePendingWashByAdmin);
 router.delete("/deletecustomer/:id", deleteCustomer); // DELETE /api/customer/deletecustomer/:id
 router.get("/:id/wash-history", getCustomerWashHistory); // GET /api/customer/:id/wash-history
 router.post("/:customerId/vehicles/:vehicleId/start-package", startVehiclePackage); // Start vehicle package

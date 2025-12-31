@@ -22,6 +22,7 @@ const userRoutes = require("./routes/userRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const customerRoutes = require("./routes/CustomerRoutes");
 const washerRoutes = require("./routes/WasherRoutes"); 
+const washLogRoutes = require("./routes/washLogRoutes");
 const packageRoutes = require("./routes/PackageRoutes");
 const renewalService = require('./services/renewalService');
 
@@ -34,6 +35,7 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/customer", customerRoutes);
 app.use("/api/package", packageRoutes);
 app.use("/api/washer", washerRoutes);
+app.use("/api/washlog", washLogRoutes);
  
 
 

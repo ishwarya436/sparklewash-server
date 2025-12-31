@@ -457,15 +457,20 @@ exports.getWasherDashboard = async (req, res) => {
         const startOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
         const endOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
         
-        // Get total monthly washes from package
+        // Get total monthly washes from package or washing schedule
         let totalMonthlyWashes = 0;
-        if (assignment.packageId) {
+        // Prefer numeric wash counts on populated package documents
+        if (assignment.packageId && typeof assignment.packageId === 'object' && assignment.packageId.washCountPerMonth) {
+          totalMonthlyWashes = assignment.packageId.washCountPerMonth;
+        } else if (assignment.washingSchedule && assignment.washingSchedule.washFrequencyPerMonth) {
+          // Fallback to vehicle/customer washing schedule frequency
+          totalMonthlyWashes = assignment.washingSchedule.washFrequencyPerMonth;
+        } else if (assignment.packageId) {
+          // Last-resort: package name heuristics (kept for backward compatibility)
           const packageName = assignment.packageName;
           if (packageName === 'Basic') {
             totalMonthlyWashes = 8;
-          } else if (packageName === 'Moderate') {
-            totalMonthlyWashes = 12;
-          } else if (packageName === 'Classic') {
+          } else if (packageName === 'Moderate' || packageName === 'Classic' || packageName === 'Hatch Pack') {
             totalMonthlyWashes = 12;
           }
         }

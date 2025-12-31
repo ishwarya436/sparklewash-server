@@ -14,7 +14,7 @@ const washLogSchema = new mongoose.Schema({
   washerId: { 
     type: mongoose.Schema.Types.ObjectId, 
     ref: "Washer", 
-    required: true 
+    required: false 
   },
   packageId: { 
     type: mongoose.Schema.Types.ObjectId, 
@@ -85,6 +85,13 @@ const washLogSchema = new mongoose.Schema({
     messageType: { type: String, enum: ["completion", "reminder", "rescheduled"] },
     content: { type: String }
   },
+
+  // When the wash was marked completed (explicit timestamp)
+  completedAt: { type: Date },
+
+  // Cancellation / revert info
+  cancelledAt: { type: Date },
+  cancelledBy: { type: String },
   
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }

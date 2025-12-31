@@ -3,12 +3,12 @@ const mongoose = require("mongoose");
 const packageSchema = new mongoose.Schema({
   name: { 
     type: String, 
-    enum: ["Basic", "Moderate", "Classic"], 
+    enum: ["Basic", "Moderate", "Classic", "Hatch Pack"], 
     required: true 
   },
   carType: { 
     type: String, 
-    enum: ["sedan", "suv", "premium"], 
+    enum: ["sedan", "suv", "premium", "hatch"], 
     required: true 
   },
   pricePerMonth: { 

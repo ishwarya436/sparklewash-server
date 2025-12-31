@@ -42,17 +42,17 @@ const packages = [
     isActive: true,
   },
 
-  // Moderate
+  // Moderate (no interior per your request)
   {
     name: "Moderate",
     carType: "sedan",
     pricePerMonth: 1000,
     washCountPerWeek: 3,
     washCountPerMonth: 12,
-    interiorCleaning: "2 per month",
+    interiorCleaning: "0 per month",
     exteriorWaxing: "No",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes + 2 Interior washes per month for Sedan cars",
+    description: "12 Exterior washes per month for Sedan cars (No interior)",
     isActive: true,
   },
   {
@@ -61,10 +61,10 @@ const packages = [
     pricePerMonth: 1200,
     washCountPerWeek: 3,
     washCountPerMonth: 12,
-    interiorCleaning: "2 per month",
+    interiorCleaning: "0 per month",
     exteriorWaxing: "No",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes + 2 Interior washes per month for SUV cars",
+    description: "12 Exterior washes per month for SUV cars (No interior)",
     isActive: true,
   },
   {
@@ -73,10 +73,10 @@ const packages = [
     pricePerMonth: 1500,
     washCountPerWeek: 3,
     washCountPerMonth: 12,
-    interiorCleaning: "2 per month",
+    interiorCleaning: "0 per month",
     exteriorWaxing: "No",
     washDays: ["Monday", "Wednesday", "Friday"],
-    description: "12 Exterior washes + 2 Interior washes per month for Premium cars",
+    description: "12 Exterior washes per month for Premium cars (No interior)",
     isActive: true,
   },
 
@@ -115,6 +115,20 @@ const packages = [
     exteriorWaxing: "Yes",
     washDays: ["Monday", "Wednesday", "Friday"],
     description: "12 Exterior washes per month for Premium cars (Premium exterior only)",
+    isActive: true,
+  }
+,
+  // Hatch Pack (new)
+  {
+    name: "Hatch Pack",
+    carType: "hatch",
+    pricePerMonth: 800,
+    washCountPerWeek: 3,
+    washCountPerMonth: 12,
+    interiorCleaning: "2 per month",
+    exteriorWaxing: "No",
+    washDays: ["Monday", "Wednesday", "Friday"],
+    description: "12 Exterior washes + 2 Interior washes per month for Hatch cars",
     isActive: true,
   }
 ];
