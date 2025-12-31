@@ -28,6 +28,10 @@ function parseInteriorCleaningValue(val) {
 
 function hasInteriorFromPackage(pkg) {
   if (!pkg) return false;
+  // Explicit business rule: packages named 'Moderate' do NOT include interior cleaning
+  const name = (pkg.name || '').toString().toLowerCase();
+  if (name.includes('moderate')) return false;
+
   // consider .interiorCleaning field (string like "2 per month") or interiorCount
   let iv = null;
   if (typeof pkg.interiorCleaning !== 'undefined') iv = parseInteriorCleaningValue(pkg.interiorCleaning);

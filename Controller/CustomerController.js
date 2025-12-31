@@ -1131,6 +1131,31 @@ exports.getPendingWashesForCustomer = async (req, res) => {
     const customer = await Customer.findById(id).populate('packageId').populate('vehicles.packageId');
     if (!customer) return res.status(404).json({ message: 'Customer not found' });
 
+    // Utilities for interior detection (mirror WasherDashboard heuristics)
+    const { hasInteriorFromPackage, parseInteriorCleaningValue } = require('../utils/packageHelpers');
+    const entityHasInterior = (obj, pkg) => {
+      if (!obj && !pkg) return false;
+      // Business rule: any package named 'Moderate' explicitly disallows interior
+      const pkgName = (pkg && pkg.name) ? String(pkg.name).toLowerCase() : (obj && obj.packageName ? String(obj.packageName).toLowerCase() : '');
+      if (pkgName && pkgName.includes('moderate')) return false;
+
+      // 1) packageSpecs on vehicle/customer (new format)
+      if (obj && obj.packageSpecs && typeof obj.packageSpecs.interiorPerMonth === 'number') {
+        return obj.packageSpecs.interiorPerMonth > 0;
+      }
+      // 2) explicit fields on vehicle/customer
+      const val = (obj && (typeof obj.interiorCleaning !== 'undefined' ? obj.interiorCleaning : obj.interiorCount));
+      const parsed = parseInteriorCleaningValue(val);
+      if (typeof parsed === 'number') return parsed > 0;
+      if (obj && obj.interiorCleaning === true) return true;
+      // 3) fallback to package-level interpretation (package doc)
+      if (pkg) return hasInteriorFromPackage(pkg);
+      // 4) packageName heuristics (legacy compatibility)
+      const pn = (obj && obj.packageName) ? String(obj.packageName).toLowerCase() : '';
+      if (!pn) return false;
+      return pn.includes('classic') || pn.includes('premium') || pn.includes('basic');
+    };
+
     // Helper: generate dates in the target month matching washingDays (washingDays: [1..7] Monday=1)
     const generateDatesForMonth = (washingDays = []) => {
       const dates = [];
@@ -1152,37 +1177,38 @@ exports.getPendingWashesForCustomer = async (req, res) => {
     for (const vehicle of vehicles) {
       const washingDays = (vehicle.washingSchedule && vehicle.washingSchedule.washingDays && vehicle.washingSchedule.washingDays.length > 0) ? vehicle.washingSchedule.washingDays : (customer.washingSchedule?.washingDays || []);
 
+      // Re-evaluate interior availability using vehicle-level fields, packageSpecs and package fallback
+      const pkg = vehicle.packageId || customer.packageId || null;
+      const vehicleHasInterior = entityHasInterior(vehicle, pkg);
+
       const scheduledDates = generateDatesForMonth(washingDays || []);
 
-      const pending = [];
-      for (const d of scheduledDates) {
-        // Respect package start/end dates at vehicle-level, fallback to customer-level
+      // Determine package total for this vehicle so we don't show more scheduled dates than package allows
+      const vehicleCounts = await calculateWashCounts(customer, vehicle._id);
+      const packageTotal = (vehicleCounts && typeof vehicleCounts.total === 'number') ? vehicleCounts.total : scheduledDates.length;
+
+      // Respect package start/end dates and build an in-range list first
+      const inRangeDates = scheduledDates.filter(d => {
         const vehicleStart = vehicle.packageStartDate ? new Date(vehicle.packageStartDate) : (vehicle.subscriptionStart ? new Date(vehicle.subscriptionStart) : (customer.packageStartDate ? new Date(customer.packageStartDate) : null));
         const vehicleEnd = vehicle.packageEndDate ? new Date(vehicle.packageEndDate) : (vehicle.subscriptionEnd ? new Date(vehicle.subscriptionEnd) : (customer.packageEndDate ? new Date(customer.packageEndDate) : null));
+        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+        if (vehicleStart && dayEnd < new Date(vehicleStart.getFullYear(), vehicleStart.getMonth(), vehicleStart.getDate(), 0, 0, 0)) return false;
+        if (vehicleEnd && dayStart > new Date(vehicleEnd.getFullYear(), vehicleEnd.getMonth(), vehicleEnd.getDate(), 23, 59, 59)) return false;
+        return true;
+      });
 
-        // Normalize day boundaries for comparison
+      // Cap the scheduled dates to the package total (earliest dates in the month)
+      const cappedScheduledDates = inRangeDates.slice(0, packageTotal);
+
+      const pending = [];
+      for (const d of cappedScheduledDates) {
         const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
         const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
 
-        // If package start is after this date, skip
-        if (vehicleStart && dayEnd < new Date(vehicleStart.getFullYear(), vehicleStart.getMonth(), vehicleStart.getDate(), 0, 0, 0)) {
-          continue; // not started yet for this vehicle
-        }
-        // If package end is before this date, skip
-        if (vehicleEnd && dayStart > new Date(vehicleEnd.getFullYear(), vehicleEnd.getMonth(), vehicleEnd.getDate(), 23, 59, 59)) {
-          continue; // package expired before this date
-        }
-
-        // Check if a completed wash exists for this vehicle on this date
         const completed = await WashLog.exists({ customerId: id, vehicleId: vehicle._id, status: 'completed', washDate: { $gte: dayStart, $lte: dayEnd } });
-
         if (!completed) {
-          // Determine washType: if package interiorCleaning exists then both else exterior
-          const pkg = vehicle.packageId || customer.packageId || null;
-          const { hasInteriorFromPackage } = require('../utils/packageHelpers');
-          const hasInterior = hasInteriorFromPackage(pkg);
-          const washType = hasInterior ? 'both' : 'exterior';
-
+          const washType = vehicleHasInterior ? 'both' : 'exterior';
           pending.push({
             scheduledDate: new Date(d),
             day: d.toLocaleDateString('en-US', { weekday: 'short' }),
@@ -1192,16 +1218,20 @@ exports.getPendingWashesForCustomer = async (req, res) => {
         }
       }
 
-      // Cap the pending list to the calculated pending count for this vehicle so the modal aligns with package counts
-      const vehicleCounts = await calculateWashCounts(customer, vehicle._id);
+      // Cap the pending list to pending count (safety) so it aligns with package remaining count
       const cappedPending = (vehicleCounts && typeof vehicleCounts.pending === 'number') ? pending.slice(0, vehicleCounts.pending) : pending;
+      const totalScheduledCapped = cappedScheduledDates.length;
 
       results.push({
         vehicleId: vehicle._id,
         vehicleNo: vehicle.vehicleNo,
         pendingWashes: cappedPending,
-        totalScheduled: pending.length,
-        pendingCount: vehicleCounts ? vehicleCounts.pending : 0
+        totalScheduled: totalScheduledCapped,
+        pendingCount: vehicleCounts ? vehicleCounts.pending : 0,
+        hasInterior: vehicleHasInterior,
+        packageId: vehicle.packageId ? (vehicle.packageId._id || vehicle.packageId) : (customer.packageId ? (customer.packageId._id || customer.packageId) : null),
+        packageName: vehicle.packageId ? (vehicle.packageId.name || vehicle.packageName) : (customer.packageId ? (customer.packageId.name || customer.packageName) : (vehicle.packageName || customer.packageName || null)),
+        packageInterior: (vehicle.packageId && vehicle.packageId.interiorCleaning) || (customer.packageId && customer.packageId.interiorCleaning) || null
       });
     }
 
@@ -1209,33 +1239,43 @@ exports.getPendingWashesForCustomer = async (req, res) => {
     if (vehicles.length === 0) {
       const washingDays = (customer.washingSchedule && customer.washingSchedule.washingDays && customer.washingSchedule.washingDays.length > 0) ? customer.washingSchedule.washingDays : [];
       const scheduledDates = generateDatesForMonth(washingDays || []);
-      const pending = [];
-      for (const d of scheduledDates) {
-        // Respect customer-level package start/end dates
+      // Determine customer-level package total so we don't show more scheduled dates than package allows
+      const counts = await calculateWashCounts(customer);
+      const packageTotal = (counts && typeof counts.total === 'number') ? counts.total : scheduledDates.length;
+
+      // Respect customer-level package start/end dates and filter in-range
+      const inRangeDates = scheduledDates.filter(d => {
         const custStart = customer.packageStartDate ? new Date(customer.packageStartDate) : null;
         const custEnd = customer.packageEndDate ? new Date(customer.packageEndDate) : null;
+        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+        if (custStart && dayEnd < new Date(custStart.getFullYear(), custStart.getMonth(), custStart.getDate(), 0, 0, 0)) return false;
+        if (custEnd && dayStart > new Date(custEnd.getFullYear(), custEnd.getMonth(), custEnd.getDate(), 23, 59, 59)) return false;
+        return true;
+      });
 
+      const cappedScheduledDates = inRangeDates.slice(0, packageTotal);
+
+      const pending = [];
+      // Determine customer-level interior availability using same heuristics as vehicle-level
+      const custPkg = customer.packageId || null;
+      const customerHasInterior = entityHasInterior(customer, custPkg);
+
+      for (const d of cappedScheduledDates) {
         const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
         const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
 
-        if (custStart && dayEnd < new Date(custStart.getFullYear(), custStart.getMonth(), custStart.getDate(), 0, 0, 0)) continue;
-        if (custEnd && dayStart > new Date(custEnd.getFullYear(), custEnd.getMonth(), custEnd.getDate(), 23, 59, 59)) continue;
-
         const completed = await WashLog.exists({ customerId: id, status: 'completed', washDate: { $gte: dayStart, $lte: dayEnd } });
         if (!completed) {
-          const pkg = customer.packageId || null;
-          const { hasInteriorFromPackage } = require('../utils/packageHelpers');
-          const hasInterior = hasInteriorFromPackage(pkg);
-          const washType = hasInterior ? 'both' : 'exterior';
+          const washType = customerHasInterior ? 'both' : 'exterior';
           pending.push({ scheduledDate: new Date(d), day: d.toLocaleDateString('en-US', { weekday: 'short' }), missed: d < new Date(), washType });
         }
       }
 
       // Cap pending list to calculated pending count for legacy single-vehicle customers
-      const counts = await calculateWashCounts(customer);
       const cappedPending = (counts && typeof counts.pending === 'number') ? pending.slice(0, counts.pending) : pending;
 
-      results.push({ vehicleId: null, vehicleNo: customer.vehicleNo || null, pendingWashes: cappedPending, totalScheduled: pending.length, pendingCount: counts ? counts.pending : 0 });
+      results.push({ vehicleId: null, vehicleNo: customer.vehicleNo || null, pendingWashes: cappedPending, totalScheduled: cappedScheduledDates.length, pendingCount: counts ? counts.pending : 0, hasInterior: customerHasInterior, packageId: customer.packageId ? (customer.packageId._id || customer.packageId) : null, packageName: customer.packageId ? (customer.packageId.name || customer.packageName) : (customer.packageName || null), packageInterior: (customer.packageId && customer.packageId.interiorCleaning) || null });
     }
 
     res.status(200).json({ vehicles: results, month: `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}` });
@@ -1266,7 +1306,8 @@ exports.completePendingWashByAdmin = async (req, res) => {
       .populate('vehicles.washerId');
     if (!customer) return res.status(404).json({ message: 'Customer not found' });
 
-    // Determine washType
+    // Determine washType (honor explicit request from UI when provided)
+    const { washType: requestedWashType } = req.body; // 'both' or 'exterior'
     let pkg = null;
     if (vehicleId) {
       const vehicle = customer.vehicles.find(v => String(v._id) === String(vehicleId));
@@ -1275,9 +1316,15 @@ exports.completePendingWashByAdmin = async (req, res) => {
     } else {
       pkg = customer.packageId || null;
     }
+
     const { hasInteriorFromPackage } = require('../utils/packageHelpers');
     const hasInterior = hasInteriorFromPackage(pkg);
-    const washType = hasInterior ? 'both' : 'exterior';
+
+    // Precedence: explicit requestedWashType ('both'|'exterior') > package-derived default
+    let washType = 'exterior';
+    if (requestedWashType === 'both') washType = 'both';
+    else if (requestedWashType === 'exterior') washType = 'exterior';
+    else washType = hasInterior ? 'both' : 'exterior';
 
     // Determine assigned washer (use vehicle assignment if available, otherwise customer-level washer)
     let assignedWasherId = null;
