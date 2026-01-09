@@ -1105,7 +1105,7 @@ exports.getPendingWashesForCustomer = async (req, res) => {
   try {
     // Support both /:id and /:customerId route parameter names
     const id = req.params.customerId || req.params.id;
-    const { month } = req.query; // optional YYYY-MM
+    const { month } = req.query; // optional YYYY-MM or 'all' to view full package window
 
     console.debug('getPendingWashesForCustomer - customerId:', id, 'month:', month);
 
@@ -1113,19 +1113,50 @@ exports.getPendingWashesForCustomer = async (req, res) => {
       return res.status(400).json({ message: "Invalid customer ID" });
     }
 
-    // Parse month filter
-    let targetYear, targetMonth;
-    if (month) {
-      [targetYear, targetMonth] = month.split('-').map(Number);
-      targetMonth = targetMonth - 1; // JS month index
-    } else {
-      const now = new Date();
-      targetYear = now.getFullYear();
-      targetMonth = now.getMonth();
+    // Determine whether the caller wants to view the full package duration
+    const viewPackageWindow = (typeof month === 'string' && month.toLowerCase() === 'all');
+
+    // Default to calendar month unless package window requested
+    let startDate = null, endDate = null;
+    if (!viewPackageWindow) {
+      if (!month) {
+        const now = new Date();
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+      } else {
+        // Accept either YYYY-MM or human-readable month strings (e.g. "January, 2026")
+        const ymdMatch = String(month).trim().match(/^(\d{4})-(\d{1,2})$/);
+        if (ymdMatch) {
+          const targetYear = Number(ymdMatch[1]);
+          const targetMonth = Number(ymdMatch[2]) - 1; // 0-based
+          startDate = new Date(targetYear, targetMonth, 1, 0, 0, 0);
+          endDate = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
+        } else {
+          // Try to parse other common formats (like "January, 2026")
+          const parsed = new Date(month);
+          if (isNaN(parsed.getTime())) {
+            console.warn('getPendingWashesForCustomer - invalid month format:', month);
+            return res.status(400).json({ message: 'Invalid month format. Pass YYYY-MM or the literal "all".' });
+          }
+          startDate = new Date(parsed.getFullYear(), parsed.getMonth(), 1, 0, 0, 0);
+          endDate = new Date(parsed.getFullYear(), parsed.getMonth() + 1, 0, 23, 59, 59);
+        }
+      }
     }
 
-    const startDate = new Date(targetYear, targetMonth, 1, 0, 0, 0);
-    const endDate = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
+    // Utility: generate dates between arbitrary start/end matching washingDays
+    const generateDatesForRange = (washingDays = [], rangeStart = startDate, rangeEnd = endDate) => {
+      const dates = [];
+      if (!rangeStart || !rangeEnd) return dates;
+      for (let d = new Date(rangeStart); d <= rangeEnd; d.setDate(d.getDate() + 1)) {
+        const jsDay = d.getDay(); // 0 (Sun) - 6 (Sat)
+        const scheduleDay = jsDay === 0 ? 7 : jsDay; // 1..7 mapping
+        if (washingDays.includes(scheduleDay)) {
+          dates.push(new Date(d));
+        }
+      }
+      return dates;
+    };
 
     // Fetch customer and populate package info for vehicles
     const customer = await Customer.findById(id).populate('packageId').populate('vehicles.packageId');
@@ -1181,9 +1212,22 @@ exports.getPendingWashesForCustomer = async (req, res) => {
       const pkg = vehicle.packageId || customer.packageId || null;
       const vehicleHasInterior = entityHasInterior(vehicle, pkg);
 
-      const scheduledDates = generateDatesForMonth(washingDays || []);
+      // Compute scheduled dates either for the selected calendar month or for the package window
+      let scheduledDates;
+      if (viewPackageWindow) {
+        const vehicleStart = vehicle.packageStartDate ? new Date(vehicle.packageStartDate) : (vehicle.subscriptionStart ? new Date(vehicle.subscriptionStart) : (customer.packageStartDate ? new Date(customer.packageStartDate) : null));
+        const vehicleEnd = vehicle.packageEndDate ? new Date(vehicle.packageEndDate) : (vehicle.subscriptionEnd ? new Date(vehicle.subscriptionEnd) : (customer.packageEndDate ? new Date(customer.packageEndDate) : null));
+        if (!vehicleStart || !vehicleEnd) {
+          scheduledDates = [];
+        } else {
+          scheduledDates = [];
+          for (let d = new Date(vehicleStart); d <= vehicleEnd; d.setDate(d.getDate() + 1)) scheduledDates.push(new Date(d));
+        }
+      } else {
+        scheduledDates = generateDatesForRange(washingDays || [], startDate, endDate);
+      }
 
-      // Determine package total for this vehicle so we don't show more scheduled dates than package allows
+      // Determine package total for this vehicle so we don't allow more completions than package allows
       const vehicleCounts = await calculateWashCounts(customer, vehicle._id);
       const packageTotal = (vehicleCounts && typeof vehicleCounts.total === 'number') ? vehicleCounts.total : scheduledDates.length;
 
@@ -1198,36 +1242,51 @@ exports.getPendingWashesForCustomer = async (req, res) => {
         return true;
       });
 
-      // Cap the scheduled dates to the package total (earliest dates in the month)
-      const cappedScheduledDates = inRangeDates.slice(0, packageTotal);
-
-      const pending = [];
-      for (const d of cappedScheduledDates) {
-        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
-        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
-
-        const completed = await WashLog.exists({ customerId: id, vehicleId: vehicle._id, status: 'completed', washDate: { $gte: dayStart, $lte: dayEnd } });
-        if (!completed) {
-          const washType = vehicleHasInterior ? 'both' : 'exterior';
-          pending.push({
-            scheduledDate: new Date(d),
-            day: d.toLocaleDateString('en-US', { weekday: 'short' }),
-            missed: d < new Date(),
-            washType
-          });
-        }
+      // Fetch completed washes for this vehicle within the in-range window once
+      let completedDocs = [];
+      if (inRangeDates.length > 0) {
+        const first = new Date(inRangeDates[0].getFullYear(), inRangeDates[0].getMonth(), inRangeDates[0].getDate(), 0, 0, 0);
+        const last = new Date(inRangeDates[inRangeDates.length - 1].getFullYear(), inRangeDates[inRangeDates.length - 1].getMonth(), inRangeDates[inRangeDates.length - 1].getDate(), 23, 59, 59);
+        completedDocs = await WashLog.find({ customerId: id, vehicleId: vehicle._id, status: 'completed', washDate: { $gte: first, $lte: last } }).lean();
       }
 
-      // Cap the pending list to pending count (safety) so it aligns with package remaining count
-      const cappedPending = (vehicleCounts && typeof vehicleCounts.pending === 'number') ? pending.slice(0, vehicleCounts.pending) : pending;
-      const totalScheduledCapped = cappedScheduledDates.length;
+      // Map completed dates for quick lookup
+      const completedByDate = {};
+      for (const cd of completedDocs) {
+        const key = new Date(cd.washDate).toISOString().slice(0,10);
+        if (!completedByDate[key]) completedByDate[key] = [];
+        completedByDate[key].push(cd);
+      }
+
+      // Build packageDays list (each day in window with completion info)
+      const days = inRangeDates.map(d => {
+        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
+        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
+        const key = d.toISOString().slice(0,10);
+        const completedDocsForDay = completedByDate[key] || [];
+        const completed = completedDocsForDay.length > 0;
+        const washType = completed ? (completedDocsForDay[0].washType || (vehicleHasInterior ? 'both' : 'exterior')) : (vehicleHasInterior ? 'both' : 'exterior');
+        return {
+          scheduledDate: new Date(d),
+          day: d.toLocaleDateString('en-US', { weekday: 'short' }),
+          missed: d < new Date(),
+          completed,
+          washType,
+          completedCountForDay: completedDocsForDay.length
+        };
+      });
+
+      const completedCount = Object.values(completedByDate).reduce((acc, arr) => acc + arr.length, 0);
+      const remaining = Math.max(0, packageTotal - completedCount);
 
       results.push({
         vehicleId: vehicle._id,
         vehicleNo: vehicle.vehicleNo,
-        pendingWashes: cappedPending,
-        totalScheduled: totalScheduledCapped,
-        pendingCount: vehicleCounts ? vehicleCounts.pending : 0,
+        packageDays: days,
+        packageTotal: packageTotal,
+        completedCount: completedCount,
+        remaining: remaining,
+        totalScheduled: inRangeDates.length,
         hasInterior: vehicleHasInterior,
         packageId: vehicle.packageId ? (vehicle.packageId._id || vehicle.packageId) : (customer.packageId ? (customer.packageId._id || customer.packageId) : null),
         packageName: vehicle.packageId ? (vehicle.packageId.name || vehicle.packageName) : (customer.packageId ? (customer.packageId.name || customer.packageName) : (vehicle.packageName || customer.packageName || null)),
@@ -1238,8 +1297,21 @@ exports.getPendingWashesForCustomer = async (req, res) => {
     // Legacy: if customer has no vehicles, handle single vehicle fields
     if (vehicles.length === 0) {
       const washingDays = (customer.washingSchedule && customer.washingSchedule.washingDays && customer.washingSchedule.washingDays.length > 0) ? customer.washingSchedule.washingDays : [];
-      const scheduledDates = generateDatesForMonth(washingDays || []);
-      // Determine customer-level package total so we don't show more scheduled dates than package allows
+      // Compute scheduled dates either for the selected month or for the package window
+      let scheduledDates;
+      if (viewPackageWindow) {
+        const custStart = customer.packageStartDate ? new Date(customer.packageStartDate) : null;
+        const custEnd = customer.packageEndDate ? new Date(customer.packageEndDate) : null;
+        if (!custStart || !custEnd) scheduledDates = [];
+        else {
+          scheduledDates = [];
+          for (let d = new Date(custStart); d <= custEnd; d.setDate(d.getDate() + 1)) scheduledDates.push(new Date(d));
+        }
+      } else {
+        scheduledDates = generateDatesForRange(washingDays || [], startDate, endDate);
+      }
+
+      // Determine customer-level package total so we don't allow more completions than package allows
       const counts = await calculateWashCounts(customer);
       const packageTotal = (counts && typeof counts.total === 'number') ? counts.total : scheduledDates.length;
 
@@ -1254,31 +1326,37 @@ exports.getPendingWashesForCustomer = async (req, res) => {
         return true;
       });
 
-      const cappedScheduledDates = inRangeDates.slice(0, packageTotal);
-
-      const pending = [];
-      // Determine customer-level interior availability using same heuristics as vehicle-level
-      const custPkg = customer.packageId || null;
-      const customerHasInterior = entityHasInterior(customer, custPkg);
-
-      for (const d of cappedScheduledDates) {
-        const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0);
-        const dayEnd = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59);
-
-        const completed = await WashLog.exists({ customerId: id, status: 'completed', washDate: { $gte: dayStart, $lte: dayEnd } });
-        if (!completed) {
-          const washType = customerHasInterior ? 'both' : 'exterior';
-          pending.push({ scheduledDate: new Date(d), day: d.toLocaleDateString('en-US', { weekday: 'short' }), missed: d < new Date(), washType });
-        }
+      // Fetch completed washes for the customer within in-range window
+      let completedDocs = [];
+      if (inRangeDates.length > 0) {
+        const first = new Date(inRangeDates[0].getFullYear(), inRangeDates[0].getMonth(), inRangeDates[0].getDate(), 0, 0, 0);
+        const last = new Date(inRangeDates[inRangeDates.length - 1].getFullYear(), inRangeDates[inRangeDates.length - 1].getMonth(), inRangeDates[inRangeDates.length - 1].getDate(), 23, 59, 59);
+        completedDocs = await WashLog.find({ customerId: id, status: 'completed', washDate: { $gte: first, $lte: last } }).lean();
       }
 
-      // Cap pending list to calculated pending count for legacy single-vehicle customers
-      const cappedPending = (counts && typeof counts.pending === 'number') ? pending.slice(0, counts.pending) : pending;
+      const completedByDate = {};
+      for (const cd of completedDocs) {
+        const key = new Date(cd.washDate).toISOString().slice(0,10);
+        if (!completedByDate[key]) completedByDate[key] = [];
+        completedByDate[key].push(cd);
+      }
 
-      results.push({ vehicleId: null, vehicleNo: customer.vehicleNo || null, pendingWashes: cappedPending, totalScheduled: cappedScheduledDates.length, pendingCount: counts ? counts.pending : 0, hasInterior: customerHasInterior, packageId: customer.packageId ? (customer.packageId._id || customer.packageId) : null, packageName: customer.packageId ? (customer.packageId.name || customer.packageName) : (customer.packageName || null), packageInterior: (customer.packageId && customer.packageId.interiorCleaning) || null });
+      const days = inRangeDates.map(d => {
+        const key = d.toISOString().slice(0,10);
+        const completedDocsForDay = completedByDate[key] || [];
+        const completed = completedDocsForDay.length > 0;
+        const washType = completed ? (completedDocsForDay[0].washType || (customerHasInterior ? 'both' : 'exterior')) : (customerHasInterior ? 'both' : 'exterior');
+        return { scheduledDate: new Date(d), day: d.toLocaleDateString('en-US', { weekday: 'short' }), missed: d < new Date(), completed, washType, completedCountForDay: completedDocsForDay.length };
+      });
+
+      const completedCount = Object.values(completedByDate).reduce((acc, arr) => acc + arr.length, 0);
+      const remaining = Math.max(0, packageTotal - completedCount);
+
+      results.push({ vehicleId: null, vehicleNo: customer.vehicleNo || null, packageDays: days, packageTotal, completedCount, remaining, totalScheduled: inRangeDates.length, hasInterior: customerHasInterior, packageId: customer.packageId ? (customer.packageId._id || customer.packageId) : null, packageName: customer.packageId ? (customer.packageId.name || customer.packageName) : (customer.packageName || null), packageInterior: (customer.packageId && customer.packageId.interiorCleaning) || null });
     }
 
-    res.status(200).json({ vehicles: results, month: `${targetYear}-${String(targetMonth + 1).padStart(2, '0')}` });
+    const responseMonth = viewPackageWindow ? 'package' : (startDate ? `${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}` : null);
+    res.status(200).json({ vehicles: results, month: responseMonth });
   } catch (error) {
     console.error('Error fetching pending washes for customer:', error);
     res.status(500).json({ message: 'Error fetching pending washes', error: error.message });
@@ -1343,6 +1421,51 @@ exports.completePendingWashByAdmin = async (req, res) => {
         if (washerDoc && washerDoc.name) assignedWasherName = washerDoc.name;
       } catch (e) {
         console.error('Error fetching washer for assignedWasherId:', assignedWasherId, e);
+      }
+    }
+
+    // Validate scheduledDate within package window and ensure package count not exceeded
+    const schedDate = new Date(scheduledDate);
+    let pkgStart = null, pkgEnd = null, packageName = null;
+    if (vehicleId) {
+      const vehicle = customer.vehicles.find(v => String(v._id) === String(vehicleId));
+      pkgStart = vehicle.packageStartDate ? new Date(vehicle.packageStartDate) : (vehicle.subscriptionStart ? new Date(vehicle.subscriptionStart) : (customer.packageStartDate ? new Date(customer.packageStartDate) : null));
+      pkgEnd = vehicle.packageEndDate ? new Date(vehicle.packageEndDate) : (vehicle.subscriptionEnd ? new Date(vehicle.subscriptionEnd) : (customer.packageEndDate ? new Date(customer.packageEndDate) : null));
+      packageName = vehicle.packageId ? (vehicle.packageId.name || vehicle.packageName) : (vehicle.packageName || (customer.packageId ? customer.packageId.name : null));
+    } else {
+      pkgStart = customer.packageStartDate ? new Date(customer.packageStartDate) : null;
+      pkgEnd = customer.packageEndDate ? new Date(customer.packageEndDate) : null;
+      packageName = customer.packageId ? (customer.packageId.name || customer.packageName) : customer.packageName;
+    }
+
+    if (pkgStart && pkgEnd) {
+      const dayStart = new Date(schedDate.getFullYear(), schedDate.getMonth(), schedDate.getDate(), 0, 0, 0);
+      const dayEnd = new Date(schedDate.getFullYear(), schedDate.getMonth(), schedDate.getDate(), 23, 59, 59);
+      if (dayEnd < new Date(pkgStart.getFullYear(), pkgStart.getMonth(), pkgStart.getDate(), 0, 0, 0) || dayStart > new Date(pkgEnd.getFullYear(), pkgEnd.getMonth(), pkgEnd.getDate(), 23, 59, 59)) {
+        return res.status(400).json({ message: 'Scheduled date is outside the package duration' });
+      }
+
+      // Determine package total based on package name
+      let packageTotal = 8;
+      const pkgNameLower = packageName ? String(packageName).toLowerCase() : '';
+      if (pkgNameLower === 'basic') packageTotal = 8;
+      else if (pkgNameLower.includes('moderate') || pkgNameLower.includes('classic') || pkgNameLower.includes('hatch')) packageTotal = 12;
+
+      const completedCount = await WashLog.countDocuments({
+        customerId: id,
+        vehicleId: vehicleId || null,
+        status: 'completed',
+        washDate: { $gte: new Date(pkgStart.getFullYear(), pkgStart.getMonth(), pkgStart.getDate(), 0,0,0), $lte: new Date(pkgEnd.getFullYear(), pkgEnd.getMonth(), pkgEnd.getDate(), 23,59,59) }
+      });
+
+      if (completedCount >= packageTotal) {
+        return res.status(400).json({ message: 'Your wash count completed for this package' });
+      }
+
+      // Also check if this scheduled date already has a completed wash
+      const alreadyDone = await WashLog.exists({ customerId: id, vehicleId: vehicleId || null, status: 'completed', washDate: { $gte: dayStart, $lte: dayEnd } });
+      if (alreadyDone) {
+        return res.status(400).json({ message: 'Scheduled date is already completed' });
       }
     }
 
@@ -2455,6 +2578,31 @@ exports.updateVehicle = async (req, res) => {
       washingDays: washingDays,
       washFrequencyPerMonth: washFrequencyPerMonth
     };
+
+    // Optional: accept manual package start/end dates (admin edits)
+    if (typeof req.body.packageStartDate !== 'undefined' || typeof req.body.packageEndDate !== 'undefined') {
+      const s = req.body.packageStartDate ? new Date(req.body.packageStartDate) : vehicle.packageStartDate;
+      const e = req.body.packageEndDate ? new Date(req.body.packageEndDate) : vehicle.packageEndDate;
+
+      if (s && e && s > e) {
+        return res.status(400).json({ message: 'packageStartDate cannot be after packageEndDate' });
+      }
+
+      if (req.body.packageStartDate) vehicle.packageStartDate = s;
+      if (req.body.packageEndDate) vehicle.packageEndDate = e;
+
+      // Record into packageHistory for auditability
+      vehicle.packageHistory = vehicle.packageHistory || [];
+      vehicle.packageHistory.push({
+        packageId: vehicle.packageId || packageId,
+        packageName: vehicle.packageName || (selectedPackage && selectedPackage.name) || null,
+        startDate: vehicle.packageStartDate,
+        endDate: vehicle.packageEndDate,
+        autoRenewed: false,
+        updatedByAdmin: true,
+        updatedAt: new Date()
+      });
+    }
 
     const updatedCustomer = await customer.save();
     
