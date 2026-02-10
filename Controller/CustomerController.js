@@ -78,22 +78,6 @@ const calculateWashCounts = async (customer, vehicleId = null) => {
       if (!vehicle || !vehicle.packageId) {
         return { completed: 0, pending: 0, total: 0 };
       }
-      // If package expired and vehicle is set to autoRenew (default true), renew now
-      try {
-        const now = new Date();
-        if (vehicle.packageEndDate && new Date(vehicle.packageEndDate) <= now && vehicle.autoRenew !== false) {
-          console.log(`Auto-renew triggered for vehicle ${vehicle._id} (customer ${customer._id})`);
-          await renewalService.renewVehiclePackage(customer._id, vehicle._id);
-          // reload customer and vehicle references after renewal
-          const refreshed = await Customer.findById(customer._id).populate('vehicles.packageId');
-          if (refreshed) {
-            customer = refreshed;
-            vehicle = customer.vehicles?.find(v => v._id.toString() === vehicleId.toString());
-          }
-        }
-      } catch (renewErr) {
-        console.error('Error auto-renewing vehicle package in calculateWashCounts:', renewErr);
-      }
       
       // Calculate total washes for current month based on vehicle's package
       let totalMonthlyWashes = 0;
@@ -141,31 +125,6 @@ const calculateWashCounts = async (customer, vehicleId = null) => {
     }
     
     // Original logic for single-vehicle customers
-    // If legacy single-customer package expired and autoRenew is enabled, renew now
-    try {
-      const now = new Date();
-      if (!customer.vehicles || customer.vehicles.length === 0) {
-        if (customer.packageEndDate && new Date(customer.packageEndDate) <= now && customer.autoRenew !== false) {
-          console.log(`Auto-renew triggered for legacy customer ${customer._id}`);
-          const prevEnd = customer.packageEndDate || now;
-          const newStart = prevEnd;
-          const newEnd = new Date(prevEnd);
-          newEnd.setDate(newEnd.getDate() + 29);
-          await Customer.updateOne(
-            { _id: customer._id },
-            {
-              $set: { packageStartDate: newStart, packageEndDate: newEnd },
-              $push: { packageHistory: { packageId: customer.packageId, packageName: customer.packageName, startDate: newStart, endDate: newEnd, autoRenewed: true, renewedOn: new Date() } }
-            }
-          );
-          // reload customer for fresh data
-          customer = await Customer.findById(customer._id);
-        }
-      }
-    } catch (legacyRenewErr) {
-      console.error('Error auto-renewing legacy single-customer package in calculateWashCounts:', legacyRenewErr);
-    }
-
     if (!customer.packageId) return { completed: 0, pending: 0, total: 0 };
     
     // Calculate total washes for current month based on package
